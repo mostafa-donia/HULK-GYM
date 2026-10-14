@@ -1,0 +1,49 @@
+[
+  {
+    "member_id": "m1",
+    "name": "أحمد",
+    "mobile": "01012345678",
+    "gender": "male",
+    "current_status": "expired",
+    "last_subscription_start": "",
+    "last_subscription_end": "",
+    "last_subscription_type": "",
+    "current_paid": 0,
+    "current_remaining": 0,
+    "total_paid": 0,
+    "subscriptions_history": []
+  },
+  {
+    "member_id": "MEM-00002",
+    "member_type": "member",
+    "name": "سليم",
+    "mobile": "01012345678",
+    "gender": "male",
+    "current_status": "expired",
+    "last_subscription_start": "2026-07-24",
+    "last_subscription_end": "2026-08-23",
+    "last_subscription_type": "شهري شامل - كل يوم",
+    "last_payment_date": "2026-10-13 22:27",
+    "current_paid": 400.0,
+    "current_remaining": 0.0,
+    "total_paid": 400.0,
+    "follow_up_date": "",
+    "notes": "",
+    "subscriptions_history": [
+      {
+        "payment_id": "PAY-00087",
+        "invoice_no": "INV-00087",
+        "operation_type": "new_subscription",
+        "subscription_start": "2026-07-24",
+        "subscription_end": "2026-08-23",
+        "subscription_type": "شهري شامل - كل يوم",
+        "plan_price": 400.0,
+        "paid_amount": 400.0,
+        "remaining_amount": 0.0,
+        "payment_method": "نقدي",
+        "created_at": "2026-10-13 22:27"
+      }
+    ],
+    "fingerprint_id": ""
+  }
+]

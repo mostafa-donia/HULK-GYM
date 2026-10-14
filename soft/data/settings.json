@@ -1,0 +1,68 @@
+{
+  "dashboard_password": "1234",
+  "manager_mobile": "01080922432",
+  "plans": [
+    {
+      "name": "جلسة واحدة",
+      "price": 50.0,
+      "duration_days": 1,
+      "months": 1,
+      "frequency": "جلسة واحدة"
+    },
+    {
+      "name": "شهري شامل - كل يوم",
+      "price": 400.0,
+      "duration_days": 28,
+      "months": 1,
+      "frequency": "كل يوم"
+    },
+    {
+      "name": "شهري شامل - يوم ويوم",
+      "price": 300.0,
+      "duration_days": 14,
+      "months": 1,
+      "frequency": "يوم ويوم"
+    },
+    {
+      "name": "شهري حديد - كل يوم",
+      "price": 300.0,
+      "duration_days": 28,
+      "months": 1,
+      "frequency": "كل يوم"
+    },
+    {
+      "name": "شهري حديد - يوم ويوم",
+      "price": 230.0,
+      "duration_days": 14,
+      "months": 1,
+      "frequency": "يوم ويوم"
+    }
+  ],
+  "payment_methods": [
+    "نقدي",
+    "انستاباي",
+    "فودافون كاش",
+    "تحويل بنكي",
+    "بطاقة بنكية"
+  ],
+  "expense_categories": [
+    "اخري",
+    "إيجار",
+    "معدات",
+    "فاتورة كهرباء",
+    "صيانة",
+    "مستلزمات"
+  ],
+  "expired_message_template": "تنبيه من HULK GYM\nأهلاً {name}\nاشتراكك انتهى بتاريخ: {end_date}\nنورتنا في أي وقت للتجديد والرجوع للتمرين 💪",
+  "last_whatsapp_rollover": "2026-10",
+  "whatsapp_enabled": true,
+  "daily_report_time": "17:09",
+  "google_auth_fingerprint": "38b69df08da3332834f076d48e7b1534fda9e9caabd1c848141f8bc2d9705600",
+  "search_bar_x": 0,
+  "search_bar_y": 0,
+  "esp_ip": "192.168.0.254",
+  "esp_port": 80,
+  "esp_enabled": true,
+  "whatsapp_send_mode": "paste",
+  "whatsapp_letter_delay": 0.001
+}
