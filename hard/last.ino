@@ -22,7 +22,8 @@
 // Lower  = more forgiving
 // Higher = stricter
 #define R307_SECURITY_LEVEL FINGERPRINT_SECURITY_LEVEL_1
-#define R307_MIN_MATCH_SCORE 50
+#define DEFAULT_MIN_MATCH_SCORE 50
+uint16_t minMatchScore = DEFAULT_MIN_MATCH_SCORE;
 
 // Result display timeouts
 #define FINGERPRINT_NOT_FOUND_DELAY 2000UL
@@ -60,11 +61,13 @@ WiFiState wifiState = WIFI_DISCONNECTED;
 unsigned long lastWiFiAttempt = 0;
 unsigned long wifiConnectStart = 0;
 
-IPAddress local_IP(192, 168, 1, 254);
-IPAddress gateway(192, 168, 1, 1);
+IPAddress local_IP(192, 168, 0, 254);
+IPAddress gateway(192, 168, 0, 1);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress dns1(8, 8, 8, 8);
 IPAddress dns2(1, 1, 1, 1);
+
+String savedStaticIP = "192.168.0.254";
 
 IPAddress apIP(192, 168, 4, 1);
 IPAddress apGateway(192, 168, 4, 1);
@@ -447,11 +450,29 @@ void loadWiFiCredentials()
 
   savedSSID = prefs.getString("ssid", "");
   savedPassword = prefs.getString("pass", "");
+  savedStaticIP = prefs.getString("ip", "192.168.0.254");
+  minMatchScore = prefs.getUInt("confid", DEFAULT_MIN_MATCH_SCORE);
 
   prefs.end();
 
+  if (savedStaticIP.length() > 0)
+  {
+    IPAddress parsedIP;
+    if (parsedIP.fromString(savedStaticIP))
+    {
+      local_IP = parsedIP;
+      gateway = IPAddress(local_IP[0], local_IP[1], local_IP[2], 1);
+    }
+  }
+
   Serial.print("Saved SSID: ");
   Serial.println(savedSSID);
+  Serial.print("Saved Static IP: ");
+  Serial.println(local_IP);
+  Serial.print("Configured Gateway: ");
+  Serial.println(gateway);
+  Serial.print("Saved Confidence: ");
+  Serial.println(minMatchScore);
 }
 
 
@@ -647,6 +668,39 @@ button:active {
     margin-top: 25px;
 }
 
+.btn-row {
+    display: flex;
+    gap: 8px;
+    margin-top: -12px;
+    margin-bottom: 20px;
+}
+
+.btn-preset {
+    flex: 1;
+    padding: 9px 6px;
+    background: #181818;
+    color: #9cff00;
+    border: 1px solid #333;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+.btn-preset:hover {
+    background: #252525;
+    border-color: #9cff00;
+}
+
+.hint {
+    display: block;
+    color: #777;
+    font-size: 12px;
+    margin-top: -14px;
+    margin-bottom: 18px;
+}
+
 </style>
 
 </head>
@@ -661,11 +715,11 @@ button:active {
     </div>
 
     <div class="title">
-        Wi-Fi Setup
+        Wi-Fi & System Setup
     </div>
 
     <div class="subtitle">
-        Connect your fingerprint terminal
+        Connect & configure your biometric terminal
     </div>
 
 
@@ -682,6 +736,7 @@ button:active {
             type="text"
             name="ssid"
             placeholder="Wi-Fi name"
+            value="{{SSID}}"
             autocomplete="off"
             required>
 
@@ -697,8 +752,53 @@ button:active {
             required>
 
 
+        <label>
+            Fixed IP Address
+        </label>
+
+        <input
+            type="text"
+            id="static_ip"
+            name="static_ip"
+            placeholder="e.g. 192.168.0.254"
+            value="{{STATIC_IP}}"
+            required>
+
+        <div class="btn-row">
+            <button type="button" class="btn-preset" onclick="document.getElementById('static_ip').value='192.168.0.254'">192.168.0.254 (0.x)</button>
+            <button type="button" class="btn-preset" onclick="document.getElementById('static_ip').value='192.168.1.254'">192.168.1.254 (1.x)</button>
+        </div>
+        <span class="hint">Gateway is set automatically to .1 (e.g. 192.168.0.1 or 192.168.1.1)</span>
+
+
+        <label>
+            Fingerprint Confidence Level
+        </label>
+
+        <input
+            type="number"
+            name="confidence"
+            min="10"
+            max="255"
+            value="{{CONFIDENCE}}"
+            required>
+        <span class="hint">Default: 50 (Lower = easier match / Higher = stricter)</span>
+
+
+        <label>
+            Admin Password (كلمة السر)
+        </label>
+
+        <input
+            type="password"
+            name="admin_pass"
+            placeholder="Enter 1234 to save"
+            required>
+        <span class="hint">Protected: Enter 1234 to apply changes</span>
+
+
         <button type="submit">
-            SAVE & CONNECT
+            SAVE & REBOOT
         </button>
 
 
@@ -717,6 +817,10 @@ button:active {
 
 )rawliteral";
 
+    html.replace("{{SSID}}", savedSSID);
+    html.replace("{{STATIC_IP}}", savedStaticIP);
+    html.replace("{{CONFIDENCE}}", String(minMatchScore));
+
     server.send(
         200,
         "text/html",
@@ -726,28 +830,124 @@ button:active {
 
 void handleSave()
 {
+  String admin_pass = server.arg("admin_pass");
+  admin_pass.trim();
+
+  // Protect changes with password 1234
+  if (admin_pass != "1234")
+  {
+    Serial.println("[WIFI] Unauthorized save attempt - incorrect password");
+    String errHtml = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HULK GYM - Error</title>
+<style>
+body { margin:0; min-height:100vh; background:#050505; color:white; font-family:Arial,sans-serif; display:flex; justify-content:center; align-items:center; }
+.card { width:92%; max-width:420px; background:#101010; border:2px solid #ff3333; border-radius:22px; padding:30px; text-align:center; box-shadow:0 0 30px rgba(255,51,51,0.25); }
+.logo { color:#ff3333; font-size:28px; font-weight:900; margin-bottom:10px; }
+p { color:#ccc; font-size:15px; line-height:1.6; margin-bottom:25px; }
+a { display:inline-block; width:100%; box-sizing:border-box; padding:15px; border-radius:10px; background:#ff3333; color:white; font-size:16px; font-weight:bold; text-decoration:none; }
+</style>
+</head>
+<body>
+<div class="card">
+<div class="logo">ACCESS DENIED</div>
+<p>Incorrect Admin Password! You must enter <b>1234</b> to modify network and system settings.</p>
+<a href="/">Try Again</a>
+</div>
+</body>
+</html>
+)rawliteral";
+    server.send(403, "text/html", errHtml);
+    return;
+  }
+
   String ssid = server.arg("ssid");
   String password = server.arg("password");
+  String static_ip = server.arg("static_ip");
+  String confidence_str = server.arg("confidence");
 
-  Serial.println("=== WIFI FORM RECEIVED ===");
-  Serial.print("SSID: ");
-  Serial.println(ssid);
-  Serial.print("Password: ");
-  Serial.println(password);
+  ssid.trim();
+  static_ip.trim();
+  confidence_str.trim();
+
+  Serial.println("=== WIFI & SYSTEM SETTINGS RECEIVED ===");
+  Serial.print("SSID: "); Serial.println(ssid);
+  Serial.print("Static IP: "); Serial.println(static_ip);
+  Serial.print("Confidence: "); Serial.println(confidence_str);
 
   prefs.begin("wifi", false);
 
-  prefs.putString("ssid", ssid);
-  prefs.putString("pass", password);
+  if (ssid.length() > 0)
+  {
+    prefs.putString("ssid", ssid);
+    prefs.putString("pass", password);
+    savedSSID = ssid;
+    savedPassword = password;
+  }
+
+  if (static_ip.length() > 0)
+  {
+    IPAddress parsedIP;
+    if (parsedIP.fromString(static_ip))
+    {
+      prefs.putString("ip", static_ip);
+      savedStaticIP = static_ip;
+      local_IP = parsedIP;
+      gateway = IPAddress(local_IP[0], local_IP[1], local_IP[2], 1);
+    }
+  }
+
+  int confVal = confidence_str.toInt();
+  if (confVal >= 10 && confVal <= 255)
+  {
+    minMatchScore = (uint16_t)confVal;
+    prefs.putUInt("confid", minMatchScore);
+  }
 
   prefs.end();
 
-  server.send(
-    200,
-    "text/plain",
-    "WiFi credentials saved"
-  );
+  String okHtml = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HULK GYM - Saved</title>
+<style>
+body { margin:0; min-height:100vh; background:#050505; color:white; font-family:Arial,sans-serif; display:flex; justify-content:center; align-items:center; }
+.card { width:92%; max-width:420px; background:#101010; border:2px solid #9cff00; border-radius:22px; padding:30px; text-align:center; box-shadow:0 0 30px rgba(156,255,0,0.25); }
+.logo { color:#9cff00; font-size:28px; font-weight:900; margin-bottom:10px; }
+.info { background:#181818; border-radius:10px; padding:15px; margin:20px 0; text-align:left; font-size:14px; line-height:1.8; border-left:3px solid #9cff00; }
+.val { color:#9cff00; font-weight:bold; }
+.spinner { margin:20px auto; width:36px; height:36px; border:3px solid #333; border-top:3px solid #9cff00; border-radius:50%; animation:spin 1s linear infinite; }
+@keyframes spin { 0% { transform:rotate(0deg); } 100% { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="card">
+<div class="logo">HULK GYM</div>
+<h3>Settings Saved!</h3>
+<div class="info">
+Wi-Fi: <span class="val">)rawliteral" + savedSSID + R"rawliteral(</span><br>
+Static IP: <span class="val">)rawliteral" + local_IP.toString() + R"rawliteral(</span><br>
+Gateway: <span class="val">)rawliteral" + gateway.toString() + R"rawliteral(</span><br>
+Confidence: <span class="val">)rawliteral" + String(minMatchScore) + R"rawliteral(</span>
+</div>
+<div class="spinner"></div>
+<p style="color:#aaa;font-size:13px;">Rebooting terminal and connecting now...</p>
+</div>
+</body>
+</html>
+)rawliteral";
+
+  server.send(200, "text/html", okHtml);
+
+  delay(1500);
+  ESP.restart();
 }
+
 
 // =====================================================
 // MEMBERS DATABASE + HTTP API
@@ -918,6 +1118,8 @@ void handleStatus()
   response["fingerprint"] = fingerprintSensorReady;
   response["pc_connected"] = pcConnected;
   response["members"] = getMemberCount();
+  response["ip"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : local_IP.toString();
+  response["confidence"] = minMatchScore;
 
   String output;
   serializeJson(response, output);
@@ -1384,15 +1586,16 @@ void updateMemberDisplay()
 
 void setup()
 {
+  loadWiFiCredentials();
+
   WiFi.mode(WIFI_AP_STA);
   WiFi.config(
-  local_IP,
-  gateway,
-  subnet,
-  dns1,
-  dns2
-);
-loadWiFiCredentials();
+    local_IP,
+    gateway,
+    subnet,
+    dns1,
+    dns2
+  );
 if (savedSSID.length() > 0)
 {
 WiFi.begin(
@@ -2181,12 +2384,12 @@ void searchFingerprint()
     // R307 can return a candidate ID with a low score.
     // Reject it manually if confidence is below the
     // threshold configured at the top of this file.
-    if (confidence < R307_MIN_MATCH_SCORE)
+    if (confidence < minMatchScore)
     {
       Serial.print("[ACCESS] MATCH SCORE TOO LOW: ");
       Serial.print(confidence);
       Serial.print(" < ");
-      Serial.println(R307_MIN_MATCH_SCORE);
+      Serial.println(minMatchScore);
 
       // Low score = NOT FOUND.
       showDenied(FINGERPRINT_NOT_FOUND_DELAY);
