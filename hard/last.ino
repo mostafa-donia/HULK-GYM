@@ -86,7 +86,29 @@ unsigned long lastPcHeartbeat = 0;
 const unsigned long PC_HEARTBEAT_TIMEOUT = 10000UL;
 bool tftReady = false;
 
+// =====================================================
+// LIVE WEB DIAGNOSTIC LOGS
+// =====================================================
+const int MAX_WEB_LOGS = 50;
+String webLogs[MAX_WEB_LOGS];
+int webLogIndex = 0;
+int webLogCount = 0;
 
+void logDiag(const String &tag, const String &msg)
+{
+  unsigned long totalSec = millis() / 1000;
+  unsigned long mins = totalSec / 60;
+  unsigned long secs = totalSec % 60;
+  char timeBuf[16];
+  snprintf(timeBuf, sizeof(timeBuf), "[%02lum:%02lus]", mins, secs);
+
+  String entry = String(timeBuf) + " " + tag + " " + msg;
+  Serial.println(entry);
+
+  webLogs[webLogIndex] = entry;
+  webLogIndex = (webLogIndex + 1) % MAX_WEB_LOGS;
+  if (webLogCount < MAX_WEB_LOGS) webLogCount++;
+}
 
 // =====================================================
 // RGB LED + DFPLAYER MINI
@@ -346,6 +368,8 @@ void handleDeleteFingerprint();
 int findNextFingerprintID();
 bool saveMembersDatabase(JsonDocument &doc);
 int getMemberCount();
+void handleLogs();
+void handleClearLogs();
 
 void drawWiFiStatus()
 {
@@ -439,6 +463,18 @@ void updateWiFiState()
     }
   }
 
+  if (newState != wifiState)
+  {
+    if (newState == WIFI_CONNECTED)
+    {
+      logDiag("[WIFI]", "Connected to " + savedSSID + " | IP: " + WiFi.localIP().toString());
+    }
+    else if (newState == WIFI_HOSTING)
+    {
+      logDiag("[WIFI]", "Hosting Setup AP: HULK_GYM_SETUP (192.168.4.1)");
+    }
+  }
+
   wifiState = newState;
 
   drawWiFiStatus();
@@ -476,350 +512,240 @@ void loadWiFiCredentials()
 }
 
 
+void handleLogs()
+{
+  JsonDocument doc;
+  doc["wifi"] = (wifiState == WIFI_CONNECTED) ? "connected" : "hosting";
+  doc["ip"] = (wifiState == WIFI_CONNECTED) ? WiFi.localIP().toString() : local_IP.toString();
+  doc["confidence_threshold"] = minMatchScore;
+  doc["members"] = getMemberCount();
+  doc["pc_connected"] = pcConnected;
+
+  JsonArray arr = doc["logs"].to<JsonArray>();
+  int start = (webLogCount < MAX_WEB_LOGS) ? 0 : webLogIndex;
+  for (int i = 0; i < webLogCount; i++)
+  {
+    int idx = (start + i) % MAX_WEB_LOGS;
+    arr.add(webLogs[idx]);
+  }
+
+  String output;
+  serializeJson(doc, output);
+  server.send(200, "application/json", output);
+}
+
+void handleClearLogs()
+{
+  webLogCount = 0;
+  webLogIndex = 0;
+  logDiag("[SYSTEM]", "Web console logs cleared");
+  server.send(200, "application/json", "{\"success\":true}");
+}
+
 void handleRoot()
 {
     String html = R"rawliteral(
-
 <!DOCTYPE html>
-
 <html>
-
 <head>
-
-<meta name="viewport"
-content="width=device-width, initial-scale=1">
-
-<title>HULK GYM</title>
-
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HULK GYM - Terminal</title>
 <style>
-
-* {
-    box-sizing: border-box;
-}
-
-body {
-
-    margin: 0;
-
-    min-height: 100vh;
-
-    background:
-        linear-gradient(
-            135deg,
-            #050505,
-            #111111
-        );
-
-    color: white;
-
-    font-family:
-        Arial,
-        sans-serif;
-
-    display: flex;
-
-    justify-content: center;
-
-    align-items: center;
-}
-
-
-.card {
-
-    width: 92%;
-
-    max-width: 430px;
-
-    background: #101010;
-
-    border: 2px solid #9cff00;
-
-    border-radius: 22px;
-
-    padding: 30px;
-
-    box-shadow:
-        0 0 30px
-        rgba(156,255,0,0.25);
-}
-
-
-.logo {
-
-    text-align: center;
-
-    color: #9cff00;
-
-    font-size: 32px;
-
-    font-weight: 900;
-
-    letter-spacing: 2px;
-
-    margin-bottom: 5px;
-}
-
-
-.title {
-
-    text-align: center;
-
-    font-size: 20px;
-
-    font-weight: bold;
-
-    margin-bottom: 8px;
-}
-
-
-.subtitle {
-
-    text-align: center;
-
-    color: #888;
-
-    font-size: 14px;
-
-    margin-bottom: 30px;
-}
-
-
-label {
-
-    display: block;
-
-    color: #9cff00;
-
-    font-weight: bold;
-
-    margin-bottom: 8px;
-}
-
-
-input {
-
-    width: 100%;
-
-    padding: 15px;
-
-    margin-bottom: 20px;
-
-    border-radius: 10px;
-
-    border: 1px solid #444;
-
-    background: #050505;
-
-    color: white;
-
-    font-size: 16px;
-
-    outline: none;
-}
-
-
-input:focus {
-
-    border-color: #9cff00;
-
-    box-shadow:
-        0 0 10px
-        rgba(156,255,0,0.25);
-}
-
-
-button {
-
-    width: 100%;
-
-    padding: 16px;
-
-    border: none;
-
-    border-radius: 10px;
-
-    background: #9cff00;
-
-    color: #050505;
-
-    font-size: 17px;
-
-    font-weight: 900;
-
-    cursor: pointer;
-}
-
-
-button:active {
-
-    transform:
-        scale(0.98);
-}
-
-
-.footer {
-
-    text-align: center;
-
-    color: #666;
-
-    font-size: 12px;
-
-    margin-top: 25px;
-}
-
-.btn-row {
-    display: flex;
-    gap: 8px;
-    margin-top: -12px;
-    margin-bottom: 20px;
-}
-
-.btn-preset {
-    flex: 1;
-    padding: 9px 6px;
-    background: #181818;
-    color: #9cff00;
-    border: 1px solid #333;
-    border-radius: 8px;
-    font-size: 13px;
-    font-weight: bold;
-    cursor: pointer;
-    transition: 0.2s;
-}
-
-.btn-preset:hover {
-    background: #252525;
-    border-color: #9cff00;
-}
-
-.hint {
-    display: block;
-    color: #777;
-    font-size: 12px;
-    margin-top: -14px;
-    margin-bottom: 18px;
-}
-
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: #050505; color: white; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; display: flex; justify-content: center; align-items: flex-start; padding: 20px 10px; }
+.card { width: 100%; max-width: 520px; background: #101010; border: 2px solid #9cff00; border-radius: 20px; padding: 20px; box-shadow: 0 0 30px rgba(156,255,0,0.15); }
+.header { text-align: center; margin-bottom: 14px; }
+.logo { color: #9cff00; font-size: 26px; font-weight: 900; letter-spacing: 2px; }
+.subtitle { font-size: 13px; color: #888; margin-top: 2px; }
+.status-bar { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-bottom: 16px; }
+.pill { padding: 5px 10px; border-radius: 16px; font-size: 11px; font-weight: bold; }
+.pill-green { background: #003311; color: #00ff88; border: 1px solid #00aa44; }
+.pill-cyan { background: #002b33; color: #00e5ff; border: 1px solid #0099aa; }
+.pill-dark { background: #181818; color: #ccc; border: 1px solid #333; }
+.terminal-container { background: #080808; border: 1px solid #2a2a2a; border-radius: 12px; overflow: hidden; margin-bottom: 18px; }
+.terminal-bar { display: flex; justify-content: space-between; align-items: center; background: #141414; padding: 8px 12px; border-bottom: 1px solid #242424; }
+.terminal-title { font-size: 12px; font-weight: bold; color: #eee; display: flex; align-items: center; gap: 6px; }
+.live-dot { color: #00ff88; font-size: 11px; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%{opacity:1;} 50%{opacity:0.3;} 100%{opacity:1;} }
+.terminal-actions { display: flex; gap: 6px; }
+.btn-sm { background: #202020; border: 1px solid #444; color: #9cff00; font-size: 11px; font-weight: bold; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+.btn-sm:hover { background: #2a2a2a; }
+.terminal-box { height: 260px; overflow-y: auto; padding: 10px 12px; font-family: Consolas, 'Courier New', monospace; font-size: 12px; line-height: 1.5; color: #ddd; background: #040404; word-break: break-all; }
+.terminal-box .line { margin-bottom: 4px; }
+details { background: #121212; border: 1px solid #2a2a2a; border-radius: 12px; padding: 12px 14px; margin-top: 10px; }
+summary { font-size: 14px; font-weight: bold; color: #9cff00; cursor: pointer; outline: none; list-style: none; display: flex; justify-content: space-between; align-items: center; }
+summary::-webkit-details-marker { display: none; }
+summary::after { content: '▾'; font-size: 16px; }
+details[open] summary::after { content: '▴'; }
+.form-content { margin-top: 14px; border-top: 1px solid #222; padding-top: 14px; }
+label { display: block; color: #9cff00; font-size: 12px; font-weight: bold; margin-bottom: 6px; }
+input { width: 100%; padding: 11px; margin-bottom: 12px; border-radius: 8px; border: 1px solid #3a3a3a; background: #060606; color: white; font-size: 14px; outline: none; }
+input:focus { border-color: #9cff00; }
+.btn-row { display: flex; gap: 8px; margin-top: -6px; margin-bottom: 12px; }
+.btn-preset { flex: 1; padding: 8px 4px; background: #181818; color: #9cff00; border: 1px solid #333; border-radius: 6px; font-size: 12px; font-weight: bold; cursor: pointer; }
+.btn-preset:hover { background: #222; }
+.hint { display: block; color: #666; font-size: 11px; margin-top: -8px; margin-bottom: 12px; }
+.btn-submit { width: 100%; padding: 13px; border: none; border-radius: 8px; background: #9cff00; color: #050505; font-size: 15px; font-weight: 900; cursor: pointer; margin-top: 8px; }
+.btn-submit:active { transform: scale(0.98); }
+.footer { text-align: center; color: #555; font-size: 11px; margin-top: 18px; }
 </style>
-
 </head>
-
-
 <body>
-
 <div class="card">
-
-    <div class="logo">
-        HULK GYM
+    <div class="header">
+        <div class="logo">HULK GYM</div>
+        <div class="subtitle">Live Biometric Terminal & Diagnostics</div>
     </div>
 
-    <div class="title">
-        Wi-Fi & System Setup
+    <div class="status-bar">
+        <span class="pill {{WIFI_PILL_CLASS}}">{{WIFI_STATUS}}</span>
+        <span class="pill pill-dark">IP: <span id="stat-ip">{{LOCAL_IP}}</span></span>
+        <span class="pill pill-dark">Threshold: <span id="stat-conf">{{CONFIDENCE}}</span></span>
+        <span class="pill pill-dark">Members: <span id="stat-mem">{{MEMBERS}}</span></span>
+        <span class="pill {{PC_PILL_CLASS}}" id="stat-pc">{{PC_STATUS}}</span>
     </div>
 
-    <div class="subtitle">
-        Connect & configure your biometric terminal
-    </div>
-
-
-    <form
-        action="/save"
-        method="POST">
-
-
-        <label>
-            Wi-Fi Network
-        </label>
-
-        <input
-            type="text"
-            name="ssid"
-            placeholder="Wi-Fi name"
-            value="{{SSID}}"
-            autocomplete="off"
-            required>
-
-
-        <label>
-            Wi-Fi Password
-        </label>
-
-        <input
-            type="password"
-            name="password"
-            placeholder="Wi-Fi password"
-            required>
-
-
-        <label>
-            Fixed IP Address
-        </label>
-
-        <input
-            type="text"
-            id="static_ip"
-            name="static_ip"
-            placeholder="e.g. 192.168.0.254"
-            value="{{STATIC_IP}}"
-            required>
-
-        <div class="btn-row">
-            <button type="button" class="btn-preset" onclick="document.getElementById('static_ip').value='192.168.0.254'">192.168.0.254 (0.x)</button>
-            <button type="button" class="btn-preset" onclick="document.getElementById('static_ip').value='192.168.1.254'">192.168.1.254 (1.x)</button>
+    <div class="terminal-container">
+        <div class="terminal-bar">
+            <div class="terminal-title">
+                <span class="live-dot" id="live-dot">● LIVE</span>
+                <span>DIAGNOSTIC MONITOR</span>
+            </div>
+            <div class="terminal-actions">
+                <button type="button" class="btn-sm" id="btn-pause" onclick="togglePause()">⏸️ Pause</button>
+                <button type="button" class="btn-sm" onclick="clearConsole()">🗑️ Clear</button>
+            </div>
         </div>
-        <span class="hint">Gateway is set automatically to .1 (e.g. 192.168.0.1 or 192.168.1.1)</span>
+        <div id="console" class="terminal-box">
+            <div class="line" style="color:#666;">Connecting to diagnostic feed...</div>
+        </div>
+    </div>
 
+    <details {{SETTINGS_OPEN}}>
+        <summary>⚙️ Wi-Fi & System Settings</summary>
+        <div class="form-content">
+            <form action="/save" method="POST">
+                <label>Wi-Fi Network</label>
+                <input type="text" name="ssid" placeholder="Wi-Fi name" value="{{SSID}}" autocomplete="off" required>
 
-        <label>
-            Fingerprint Confidence Level
-        </label>
+                <label>Wi-Fi Password</label>
+                <input type="password" name="password" placeholder="Wi-Fi password" required>
 
-        <input
-            type="number"
-            name="confidence"
-            min="10"
-            max="255"
-            value="{{CONFIDENCE}}"
-            required>
-        <span class="hint">Default: 50 (Lower = easier match / Higher = stricter)</span>
+                <label>Fixed IP Address</label>
+                <input type="text" id="static_ip" name="static_ip" placeholder="e.g. 192.168.0.254" value="{{STATIC_IP}}" required>
+                <div class="btn-row">
+                    <button type="button" class="btn-preset" onclick="document.getElementById('static_ip').value='192.168.0.254'">192.168.0.254 (0.x)</button>
+                    <button type="button" class="btn-preset" onclick="document.getElementById('static_ip').value='192.168.1.254'">192.168.1.254 (1.x)</button>
+                </div>
+                <span class="hint">Gateway is set automatically to .1 (e.g. 192.168.0.1 or 192.168.1.1)</span>
 
+                <label>Fingerprint Confidence Level</label>
+                <input type="number" name="confidence" min="10" max="255" value="{{CONFIDENCE}}" required>
+                <span class="hint">Default: 50 (Lower = easier match / Higher = stricter)</span>
 
-        <label>
-            Admin Password (كلمة السر)
-        </label>
+                <label>Admin Password (كلمة السر)</label>
+                <input type="password" name="admin_pass" placeholder="Enter 1234 to save" required>
+                <span class="hint">Protected: Enter 1234 to apply changes</span>
 
-        <input
-            type="password"
-            name="admin_pass"
-            placeholder="Enter 1234 to save"
-            required>
-        <span class="hint">Protected: Enter 1234 to apply changes</span>
-
-
-        <button type="submit">
-            SAVE & REBOOT
-        </button>
-
-
-    </form>
-
+                <button type="submit" class="btn-submit">SAVE & REBOOT</button>
+            </form>
+        </div>
+    </details>
 
     <div class="footer">
         HULK GYM Smart Fitness System
     </div>
-
 </div>
 
+<script>
+let isPaused = false;
+let lastLogText = "";
+
+function togglePause() {
+    isPaused = !isPaused;
+    let btn = document.getElementById("btn-pause");
+    btn.innerText = isPaused ? "▶️ Resume" : "⏸️ Pause";
+    btn.style.color = isPaused ? "#ffaa00" : "#9cff00";
+    let dot = document.getElementById("live-dot");
+    dot.innerText = isPaused ? "⏸️ PAUSED" : "● LIVE";
+    dot.style.color = isPaused ? "#ffaa00" : "#00ff88";
+}
+
+function clearConsole() {
+    fetch('/clear_logs', { method: 'POST' }).catch(()=>{});
+    document.getElementById("console").innerHTML = '<div class="line" style="color:#666;">--- Console Cleared ---</div>';
+    lastLogText = "";
+}
+
+function formatLine(line) {
+    let esc = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    esc = esc.replace(/\[([0-9]+m:[0-9]+s)\]/g, '<span style="color:#666;">[$1]</span>');
+    esc = esc.replace(/\[ALLOWED\]/g, '<span style="color:#00ff88;font-weight:bold;">[ALLOWED]</span>');
+    esc = esc.replace(/\[MATCH\]/g, '<span style="color:#9cff00;font-weight:bold;">[MATCH]</span>');
+    esc = esc.replace(/\[REJECT\]/g, '<span style="color:#ff9900;font-weight:bold;">[REJECT]</span>');
+    esc = esc.replace(/\[DENIED\]/g, '<span style="color:#ff4444;font-weight:bold;">[DENIED]</span>');
+    esc = esc.replace(/\[NOT_FOUND\]/g, '<span style="color:#ffff00;font-weight:bold;">[NOT_FOUND]</span>');
+    esc = esc.replace(/\[ERROR\]/g, '<span style="color:#ff3333;font-weight:bold;background:#330000;padding:1px 4px;border-radius:3px;">[ERROR]</span>');
+    esc = esc.replace(/\[SCAN\]/g, '<span style="color:#00e5ff;font-weight:bold;">[SCAN]</span>');
+    esc = esc.replace(/\[SENSOR\]/g, '<span style="color:#e066ff;font-weight:bold;">[SENSOR]</span>');
+    esc = esc.replace(/\[WIFI\]/g, '<span style="color:#33bbff;font-weight:bold;">[WIFI]</span>');
+    esc = esc.replace(/\[PC\]/g, '<span style="color:#77aaff;font-weight:bold;">[PC]</span>');
+    return '<div class="line">' + esc + '</div>';
+}
+
+function pollLogs() {
+    if (isPaused) {
+        setTimeout(pollLogs, 1200);
+        return;
+    }
+    fetch('/logs')
+        .then(res => res.json())
+        .then(data => {
+            if (data.ip) document.getElementById("stat-ip").innerText = data.ip;
+            if (data.confidence_threshold) document.getElementById("stat-conf").innerText = data.confidence_threshold;
+            if (data.members !== undefined) document.getElementById("stat-mem").innerText = data.members;
+            if (data.pc_connected !== undefined) {
+                let pc = document.getElementById("stat-pc");
+                if (pc) {
+                    pc.innerText = data.pc_connected ? "PC: OK" : "PC: OFFLINE";
+                    pc.className = "pill " + (data.pc_connected ? "pill-green" : "pill-dark");
+                }
+            }
+            if (data.logs && Array.isArray(data.logs)) {
+                let joined = data.logs.join("\n");
+                if (joined !== lastLogText) {
+                    lastLogText = joined;
+                    let html = data.logs.map(formatLine).join("");
+                    let c = document.getElementById("console");
+                    c.innerHTML = html || '<div class="line" style="color:#555;">Waiting for events...</div>';
+                    c.scrollTop = c.scrollHeight;
+                }
+            }
+        })
+        .catch(err => {})
+        .finally(() => {
+            setTimeout(pollLogs, 1200);
+        });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    pollLogs();
+});
+</script>
 </body>
-
 </html>
-
 )rawliteral";
 
     html.replace("{{SSID}}", savedSSID);
     html.replace("{{STATIC_IP}}", savedStaticIP);
+    html.replace("{{LOCAL_IP}}", (wifiState == WIFI_CONNECTED) ? WiFi.localIP().toString() : local_IP.toString());
     html.replace("{{CONFIDENCE}}", String(minMatchScore));
+    html.replace("{{MEMBERS}}", String(getMemberCount()));
+    html.replace("{{WIFI_STATUS}}", (wifiState == WIFI_CONNECTED) ? "CONNECTED" : "AP MODE");
+    html.replace("{{WIFI_PILL_CLASS}}", (wifiState == WIFI_CONNECTED) ? "pill-green" : "pill-cyan");
+    html.replace("{{PC_STATUS}}", pcConnected ? "PC: OK" : "PC: OFFLINE");
+    html.replace("{{PC_PILL_CLASS}}", pcConnected ? "pill-green" : "pill-dark");
+    html.replace("{{SETTINGS_OPEN}}", (wifiState == WIFI_CONNECTED) ? "" : "open");
 
     server.send(
         200,
@@ -827,6 +753,7 @@ button:active {
         html
     );
 }
+
 
 void handleSave()
 {
@@ -1624,6 +1551,8 @@ else
 }
 server.on("/", handleRoot);
 server.on("/save", HTTP_POST, handleSave);
+server.on("/logs", HTTP_GET, handleLogs);
+server.on("/clear_logs", HTTP_POST, handleClearLogs);
 server.on("/status", HTTP_GET, handleStatus);
 server.on("/members", HTTP_POST, handleMembers);
 server.on("/enroll", HTTP_POST, handleEnroll);
@@ -2305,9 +2234,8 @@ void searchFingerprint()
 
 
   // Finger detected
-
-  // One physical scan = one beep.
   playAudio(1);
+  logDiag("[SCAN]", "Finger detected on sensor");
 
   DBG("[SCAN] FINGER DETECTED -> showScanning()");
   showScanning();
@@ -2324,6 +2252,7 @@ void searchFingerprint()
     p != FINGERPRINT_OK
   )
   {
+    logDiag("[ERROR]", "Finger image capture error (code " + String(p) + ")");
     showDenied(FINGERPRINT_NOT_FOUND_DELAY);
 
     return;
@@ -2345,6 +2274,7 @@ void searchFingerprint()
     p != FINGERPRINT_OK
   )
   {
+    logDiag("[SENSOR]", "Feature extraction failed - check finger placement (code " + String(p) + ")");
     showDenied(FINGERPRINT_NOT_FOUND_DELAY);
 
     return;
@@ -2386,6 +2316,7 @@ void searchFingerprint()
     // threshold configured at the top of this file.
     if (confidence < minMatchScore)
     {
+      logDiag("[REJECT]", "Candidate ID #" + String(fingerprintID) + " | Confidence: " + String(confidence) + " < " + String(minMatchScore) + " (Score Too Low)");
       Serial.print("[ACCESS] MATCH SCORE TOO LOW: ");
       Serial.print(confidence);
       Serial.print(" < ");
@@ -2427,10 +2358,12 @@ void searchFingerprint()
 
     if (allowed)
     {
+      logDiag("[ALLOWED]", "Match ID #" + String(fingerprintID) + " | Confidence: " + String(confidence) + " >= " + String(minMatchScore) + " -> ACCESS GRANTED");
       Serial.println("[ACCESS] ALLOWED");
     }
     else
     {
+      logDiag("[DENIED]", "Match ID #" + String(fingerprintID) + " | Confidence: " + String(confidence) + " -> SUBSCRIPTION EXPIRED");
       Serial.println("[ACCESS] DENIED");
     }
 
@@ -2447,8 +2380,9 @@ void searchFingerprint()
     }
     DBG("[SCAN] local access display DONE");
   }
-  else
+  else if (p == FINGERPRINT_NOTFOUND)
   {
+    logDiag("[NOT_FOUND]", "No match found in fingerprint database");
     DBG("[SCAN] FINGERPRINT NOT FOUND");
     Serial.println("[ACCESS] FINGERPRINT NOT FOUND");
 
@@ -2456,6 +2390,12 @@ void searchFingerprint()
     showDenied(FINGERPRINT_NOT_FOUND_DELAY);
     DBG("[SCAN] showDenied() DONE");
   }
+  else
+  {
+    logDiag("[ERROR]", "Finger search failed (error code " + String(p) + ")");
+    showDenied(FINGERPRINT_NOT_FOUND_DELAY);
+  }
+
 
 }
 // =====================================================
