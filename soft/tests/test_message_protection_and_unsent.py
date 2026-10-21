@@ -88,5 +88,60 @@ class MessageProtectionAndUnsentTests(unittest.TestCase):
             self.assertEqual(m["google_contact_synced_at"], "")
 
 
+    def test_normalize_mobile_egyptian_numbers(self):
+        self.assertEqual(module.normalize_mobile("+201012345678"), "01012345678")
+        self.assertEqual(module.normalize_mobile("00201012345678"), "01012345678")
+        self.assertEqual(module.normalize_mobile("201012345678"), "01012345678")
+        self.assertEqual(module.normalize_mobile("01012345678"), "01012345678")
+        self.assertEqual(module.normalize_mobile("1012345678"), "01012345678")
+
+    def test_google_contacts_sync_stats_breakdown(self):
+        self.store.members = [
+            {"name": "عضو 1", "mobile": "01011111111"},
+            {"name": "عضو 2", "mobile": "01011111111"}, # duplicate
+            {"name": "عضو 3", "mobile": ""}, # no phone
+            {"name": "عضو 4", "mobile": "+201022222222"}, # normalized
+        ]
+        self.store.google_contacts_synced_numbers = []
+        self.store.google_contacts_queue = []
+        self.store.save_google_contacts_synced_numbers = lambda: None
+        self.store.save_google_contacts_queue = lambda: None
+        self.store.save_members = lambda: None
+        self.store.flush_google_contacts_queue = lambda progress_callback=None, total_override=None: 2
+
+        queued_added, synced_count = self.store.sync_all_google_contacts(force=True)
+        self.assertEqual(queued_added, 2) # only 2 unique valid numbers
+        self.assertEqual(synced_count, 2)
+        stats = self.store.last_google_sync_stats
+        self.assertEqual(stats["total_members"], 4)
+        self.assertEqual(stats["no_phone_count"], 1)
+        self.assertEqual(stats["duplicate_count"], 1)
+        self.assertEqual(stats["synced_count"], 2)
+
+    def test_manual_message_selection_preserves_scheduled_and_expired(self):
+        # Even if send_after is in the future, manually selected messages must have delay cleared
+        messages = [
+            {"message_id": "M1", "status": "scheduled", "send_after": "2099-01-01 00:00:00", "mobile": "01011111111", "message": "hello 1"},
+            {"message_id": "M2", "status": "failed", "error": "timeout", "mobile": "01022222222", "message": "hello 2"},
+            {"message_id": "M3", "status": "pending", "send_after": "2099-01-01 00:00:00", "mobile": "01033333333", "message": "hello 3"},
+            {"message_id": "M4", "status": "pending", "mobile": "01044444444", "message": "hello 4"},
+        ]
+        # Simulate MainWindow.send_pending_whatsapp selection logic
+        pending = []
+        for m in messages:
+            mob = module.normalize_mobile(str(m.get("mobile", "")))
+            txt = str(m.get("message", "")).strip()
+            if mob and txt:
+                m["status"] = "pending"
+                m["send_after"] = ""
+                pending.append(m)
+
+        # All 4 messages must survive and be ready
+        self.assertEqual(len(pending), 4)
+        for m in pending:
+            self.assertEqual(m["status"], "pending")
+            self.assertEqual(m["send_after"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

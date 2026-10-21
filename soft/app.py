@@ -174,7 +174,11 @@ def normalize_mobile(value: str) -> str:
     normalized = re.sub(r"\D+", "", value or "")
     if not normalized:
         return ""
-    if normalized.startswith("966") and len(normalized) >= 13:
+    if normalized.startswith("00201") and len(normalized) == 14:
+        normalized = "0" + normalized[4:]
+    elif normalized.startswith("201") and len(normalized) == 12:
+        normalized = "0" + normalized[2:]
+    elif normalized.startswith("966") and len(normalized) >= 13:
         normalized = normalized[3:]
     if len(normalized) == 10 and normalized.startswith("1"):
         normalized = "0" + normalized
@@ -414,6 +418,7 @@ def sync_member_to_google_contacts(
     *,
     force: bool = False,
     service: Optional[Any] = None,
+    max_retries: int = 3,
 ) -> tuple[bool, str]:
     try:
         if service is None:
@@ -429,8 +434,27 @@ def sync_member_to_google_contacts(
             "names": [{"givenName": name}],
             "phoneNumbers": [{"value": mobile}] if mobile else [],
         }
-        svc.people().createContact(body=contact).execute()
-        return True, "تم مزامنة العضو مع Google Contacts."
+
+        last_error = ""
+        for attempt in range(max_retries):
+            try:
+                svc.people().createContact(body=contact).execute()
+                return True, "تم مزامنة العضو مع Google Contacts."
+            except Exception as exc:
+                err_str = str(exc).lower()
+                is_rate_limit = (
+                    "429" in err_str
+                    or "resource_exhausted" in err_str
+                    or "quota" in err_str
+                    or "ratelimit" in err_str
+                    or "503" in err_str
+                )
+                last_error = str(exc)
+                if is_rate_limit and attempt < max_retries - 1:
+                    time.sleep((attempt + 1) * 2)
+                    continue
+                break
+        return False, f"فشل مزامنة Google Contacts: {last_error}"
     except Exception as exc:
         return False, f"فشل مزامنة Google Contacts: {exc}"
 
@@ -885,6 +909,7 @@ class Store:
             if progress_callback is not None:
                 total = max(0, int(total_override or 0))
                 progress_callback(total, 0, total)
+            self.last_google_sync_quota_hit = False
             return 0
 
         # Build Google Contacts service ONCE for the entire batch if available
@@ -897,7 +922,9 @@ class Store:
         synced_numbers_changed = False
         processed_count = 0
         total_count = max(int(total_override or 0), len(queue))
-        for entry in queue:
+        quota_hit = False
+
+        for idx, entry in enumerate(queue):
             name = str(entry.get("name", "") or "").strip()
             mobile = normalize_mobile(str(entry.get("mobile", "") or ""))
             if not name or not mobile:
@@ -905,13 +932,23 @@ class Store:
                 if progress_callback is not None:
                     progress_callback(processed_count, synced_count, total_count)
                 continue
+
+            # Polite pacing delay between writes to avoid burst quota errors
+            if idx > 0:
+                time.sleep(0.12)
+
+            ok = False
+            err = ""
             try:
                 if service is not None:
-                    ok, _ = sync_member_to_google_contacts({"name": name, "mobile": mobile}, service=service)
+                    ok, err = sync_member_to_google_contacts({"name": name, "mobile": mobile}, service=service)
                 else:
-                    ok, _ = sync_member_to_google_contacts({"name": name, "mobile": mobile})
+                    ok, err = sync_member_to_google_contacts({"name": name, "mobile": mobile})
             except TypeError:
-                ok, _ = sync_member_to_google_contacts({"name": name, "mobile": mobile})
+                ok, err = sync_member_to_google_contacts({"name": name, "mobile": mobile})
+            except Exception as exc:
+                ok, err = False, str(exc)
+
             if ok:
                 synced_count += 1
                 synced_at = now_str()
@@ -926,9 +963,20 @@ class Store:
                 new_entry = dict(entry)
                 new_entry["attempts"] = int(entry.get("attempts", 0) or 0) + 1
                 remaining.append(new_entry)
+                err_lower = str(err).lower()
+                if "429" in err_lower or "resource_exhausted" in err_lower or "quota" in err_lower or "ratelimit" in err_lower:
+                    quota_hit = True
+                    for unattempted in queue[idx + 1:]:
+                        remaining.append(dict(unattempted))
+                    processed_count += 1
+                    if progress_callback is not None:
+                        progress_callback(processed_count, synced_count, total_count)
+                    break
+
             processed_count += 1
             if progress_callback is not None:
                 progress_callback(processed_count, synced_count, total_count)
+
         self.google_contacts_queue = remaining
         self.save_google_contacts_queue()
         if synced_numbers_changed:
@@ -936,6 +984,7 @@ class Store:
             self.save_google_contacts_synced_numbers()
         if members_changed:
             self.save_members()
+        self.last_google_sync_quota_hit = quota_hit
         return synced_count
 
     def sync_all_google_contacts(
@@ -944,6 +993,7 @@ class Store:
         progress_callback: Optional[Callable[[int, int, int], None]] = None,
         total_for_progress: Optional[int] = None,
     ) -> tuple[int, int]:
+        total_members = len(getattr(self, "members", []))
         if force:
             # Force sync: reset previous sync state so all members get re-synced cleanly
             self._set_google_synced_numbers(set())
@@ -954,8 +1004,36 @@ class Store:
             self.save_members()
 
         queued_before = len(getattr(self, "google_contacts_queue", []))
+        no_phone_count = 0
+        duplicate_count = 0
+        already_synced_count = 0
+        existing_keys = {str(item.get("key", "")) for item in getattr(self, "google_contacts_queue", [])}
+        existing_mobiles = {normalize_mobile(str(item.get("mobile", ""))) for item in getattr(self, "google_contacts_queue", [])}
+        synced_numbers = self._get_google_synced_numbers()
+
         for member in getattr(self, "members", []):
-            self.queue_google_contact(member, force=force, save=False)
+            name = str(member.get("name", "") or "").strip()
+            mobile = normalize_mobile(str(member.get("mobile", "") or ""))
+            if not name or not mobile:
+                no_phone_count += 1
+                continue
+            if not force and mobile in synced_numbers:
+                already_synced_count += 1
+                continue
+            key = f"{name}|{mobile}"
+            if key in existing_keys or mobile in existing_mobiles:
+                duplicate_count += 1
+                continue
+            existing_keys.add(key)
+            existing_mobiles.add(mobile)
+            self.google_contacts_queue.append({
+                "key": key,
+                "name": name,
+                "mobile": mobile,
+                "created_at": now_str(),
+                "attempts": 0,
+            })
+
         self.save_google_contacts_queue()
         queued_added = len(self.google_contacts_queue) - queued_before
         total_to_process = len(self.google_contacts_queue)
@@ -963,6 +1041,17 @@ class Store:
             progress_callback=progress_callback,
             total_override=total_to_process,
         )
+
+        self.last_google_sync_stats = {
+            "total_members": total_members,
+            "queued_added": queued_added,
+            "synced_count": synced_count,
+            "no_phone_count": no_phone_count,
+            "duplicate_count": duplicate_count,
+            "already_synced_count": already_synced_count,
+            "quota_hit": getattr(self, "last_google_sync_quota_hit", False),
+            "remaining_in_queue": len(getattr(self, "google_contacts_queue", [])),
+        }
         return queued_added, synced_count
 
     def migrate_settings(self) -> None:
@@ -5485,28 +5574,35 @@ class SettingsPage(BasePage):
         total = int(result.get("total_count", 0) or 0)
         synced = int(result.get("synced_count", 0) or 0)
         queued_added = int(result.get("queued_added", 0) or 0)
-        progress_line = f"المزامنة في هذه المحاولة: {synced}/{total}"
+        stats = result.get("stats") or {}
+        no_phone = int(stats.get("no_phone_count", 0) or 0)
+        duplicates = int(stats.get("duplicate_count", 0) or 0)
+        already_synced = int(stats.get("already_synced_count", 0) or 0)
+        quota_hit = bool(stats.get("quota_hit", False))
+        remaining = int(stats.get("remaining_in_queue", 0) or 0)
 
+        lines = []
         if result.get("force"):
-            QMessageBox.information(
-                self,
-                "تم",
-                f"تمت المزامنة الإجبارية.\n{progress_line}\nتمت إضافة {queued_added} رقمًا لقائمة الإرسال إلى Google.",
-            )
-            return
-
-        if synced > 0:
-            QMessageBox.information(
-                self,
-                "تم",
-                f"{progress_line}\nتمت مزامنة {synced} رقمًا مع Google Contacts.\nتمت إضافة {queued_added} رقمًا إلى قائمة المزامنة.",
-            )
+            lines.append("نتائج المزامنة الإجبارية:")
         else:
-            QMessageBox.warning(
-                self,
-                "تنبيه",
-                f"{progress_line}\nلم تتم مزامنة أي أرقام.\nتمت إضافة {queued_added} رقمًا إلى قائمة المزامنة.",
-            )
+            lines.append("نتائج مزامنة Google Contacts:")
+        lines.append(f"• إجمالي الأعضاء في البرنامج: {total}")
+        lines.append(f"• تمت المزامنة بنجاح: {synced}")
+        if no_phone > 0:
+            lines.append(f"• تم تخطي أعضاء بدون أرقام هواتف: {no_phone}")
+        if duplicates > 0:
+            lines.append(f"• تم تخطي أرقام مكررة: {duplicates}")
+        if not result.get("force") and already_synced > 0:
+            lines.append(f"• أرقام كانت متزامنة مسبقاً: {already_synced}")
+        if quota_hit:
+            lines.append("\n⚠️ تنبيه: تم الوصول للحد الأقصى المسموح به من Google (Rate Limit).")
+            lines.append(f"تم حفظ باقي الأرقام ({remaining}) في قائمة الانتظار للمزامنة تلقائياً لاحقاً.")
+
+        summary_text = "\n".join(lines)
+        if synced > 0:
+            QMessageBox.information(self, "تمت المزامنة", summary_text)
+        else:
+            QMessageBox.warning(self, "تنبيه المزامنة", summary_text)
 
     def _on_google_sync_finished(self) -> None:
         self.google_sync_thread = None
@@ -6553,6 +6649,7 @@ class GoogleContactsSyncThread(QThread):
             queued_added = sync_res[0]
             synced_count = sync_res[1]
             total_count = sync_res[2] if len(sync_res) > 2 else self.total_members
+            stats = getattr(self.store, "last_google_sync_stats", {})
             self.done.emit(
                 {
                     "ok": True,
@@ -6560,6 +6657,7 @@ class GoogleContactsSyncThread(QThread):
                     "queued_added": queued_added,
                     "synced_count": synced_count,
                     "total_count": total_count,
+                    "stats": stats,
                     "error": "",
                 }
             )
@@ -7454,21 +7552,22 @@ class WhatsAppPage(BasePage):
         self.refresh()
 
     def send_unsent_messages(self) -> None:
-        """Collect all unsent messages (pending + failed), promote ready scheduled messages, and show selection dialog."""
+        """Collect all unsent messages (pending + failed + scheduled), reset send delays, and show selection dialog."""
         self.store.promote_scheduled_whatsapp_messages(save=True)
         unsent = [
             m for m in self.store.whatsapp_messages
-            if str(m.get("status", "")) in ("pending", "failed")
+            if str(m.get("status", "")) in ("pending", "failed", "scheduled")
         ]
         if not unsent:
-            QMessageBox.information(self, "واتساب", "لا توجد رسائل غير مرسلة (معلقة أو فاشلة) للإرسال.")
+            QMessageBox.information(self, "واتساب", "لا توجد رسائل غير مرسلة (معلقة أو فاشلة أو مجدولة) للإرسال.")
             return
 
-        # Any failed items are reset to pending so they can be processed
+        # Any failed or scheduled items are reset to pending with send_after cleared so they can be processed immediately
         reset_count = 0
         for m in unsent:
-            if str(m.get("status", "")) == "failed":
+            if str(m.get("status", "")) in ("failed", "scheduled") or str(m.get("send_after", "")).strip():
                 m["status"] = "pending"
+                m["send_after"] = ""
                 m["error"] = ""
                 reset_count += 1
         if reset_count:
@@ -7477,7 +7576,7 @@ class WhatsAppPage(BasePage):
 
         self.select_and_send(
             custom_messages=unsent,
-            title="اختيار الرسائل غير المرسلة للإرسال (المعلقة + الفاشلة)",
+            title="اختيار الرسائل غير المرسلة للإرسال (المعلقة + المجدولة + الفاشلة)",
         )
 
     def select_and_send(self, custom_messages: Optional[List[Dict[str, Any]]] = None, title: Optional[str] = None) -> None:
@@ -7679,6 +7778,12 @@ class WhatsAppPage(BasePage):
         if not chosen:
             QMessageBox.warning(self, "تنبيه", "اختر على الأقل رسالة واحدة للإرسال.")
             return
+
+        for m in chosen:
+            m["status"] = "pending"
+            m["send_after"] = ""
+            m["error"] = ""
+        self.store.save_whatsapp()
 
         self.send_pending_callback(messages=chosen)
 
@@ -8901,9 +9006,18 @@ class MainWindow(QMainWindow):
             return
         if messages is None:
             pending = self.store.pending_whatsapp_messages(ready_only=True)
-        else:
-            pending = [m for m in messages if self.store.whatsapp_message_ready(m)]
             pending = [m for m in pending if self.store.is_whatsapp_message_allowed(m, refresh_statuses_first=True)]
+        else:
+            pending = []
+            for m in messages:
+                mob = normalize_mobile(str(m.get("mobile", "")))
+                txt = str(m.get("message", "")).strip()
+                if mob and txt:
+                    m["status"] = "pending"
+                    m["send_after"] = ""
+                    pending.append(m)
+            if pending:
+                self.store.save_whatsapp()
         if types is not None:
             pending = [m for m in pending if str(m.get("type", "")) in types]
         if not pending:
