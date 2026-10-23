@@ -142,6 +142,34 @@ class MessageProtectionAndUnsentTests(unittest.TestCase):
             self.assertEqual(m["status"], "pending")
             self.assertEqual(m["send_after"], "")
 
+    def test_get_whatsapp_unsendable_reason_identifies_all_causes(self):
+        # Empty mobile
+        reason_no_mobile = self.store.get_whatsapp_unsendable_reason({"mobile": "", "message": "msg"})
+        self.assertIn("رقم الهاتف", reason_no_mobile)
+
+        # Empty message text
+        reason_no_text = self.store.get_whatsapp_unsendable_reason({"mobile": "01011111111", "message": "   "})
+        self.assertIn("فارغ", reason_no_text)
+
+        # Already sent
+        reason_sent = self.store.get_whatsapp_unsendable_reason({"mobile": "01011111111", "message": "msg", "status": "sent"})
+        self.assertIn("تم إرسالها", reason_sent)
+
+        # Scheduled wait in the future (automatic send)
+        reason_sched = self.store.get_whatsapp_unsendable_reason(
+            {"mobile": "01011111111", "message": "msg", "status": "scheduled", "send_after": "2099-01-01 00:00:00"},
+            manual=False
+        )
+        self.assertIn("مجدولة بتأخير", reason_sched)
+
+        # Reminder where member is not found
+        self.store.find_member_by_mobile = lambda mob: None
+        reason_no_member = self.store.get_whatsapp_unsendable_reason(
+            {"mobile": "01011111111", "message": "msg", "type": "reminder_3", "status": "pending"},
+            manual=True
+        )
+        self.assertIn("العضو غير مسجل", reason_no_member)
+
 
 if __name__ == "__main__":
     unittest.main()

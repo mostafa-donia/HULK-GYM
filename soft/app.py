@@ -1408,6 +1408,91 @@ class Store:
         # Allow sending only for members who just paid recently.
         return self._member_recently_paid(member, within_days=2)
 
+    def get_whatsapp_unsendable_reason(
+        self,
+        message: Dict[str, Any],
+        manual: bool = False,
+        refresh_statuses_first: bool = False,
+    ) -> Optional[str]:
+        """Return None if message can be sent, or an explicit Arabic explanation why it cannot be sent."""
+        mobile = normalize_mobile(str(message.get("mobile", "")))
+        if not mobile:
+            return "رقم الهاتف غير مسجل أو غير صحيح (فارغ)"
+
+        text = str(message.get("message", "")).strip()
+        if not text:
+            return "نص الرسالة فارغ"
+
+        status = str(message.get("status", "")).strip().lower()
+        if status == "sent":
+            return "تم إرسالها بنجاح بالفعل سابقاً"
+
+        # Check send delay (send_after) or scheduled status
+        send_after = str(message.get("send_after", "")).strip()
+        if not manual:
+            if send_after:
+                dt_after = None
+                for fmt in (DATETIME_FMT, "%Y-%m-%d %H:%M:%S"):
+                    try:
+                        dt_after = datetime.strptime(send_after, fmt)
+                        break
+                    except ValueError:
+                        continue
+                if dt_after is not None and datetime.now() < dt_after:
+                    mins = max(1, int((dt_after - datetime.now()).total_seconds() / 60))
+                    return f"مجدولة بتأخير انتظار مزامنة Google (متبقي {mins} دقيقة حتى {send_after})"
+            if status == "scheduled":
+                return f"مجدولة بتأخير انتظار مزامنة Google ({send_after or 'قيد الانتظار'})"
+
+        recipient_type = str(message.get("recipient_type", "")).strip() or "member"
+        msg_type = str(message.get("type", "")).strip().lower()
+
+        if recipient_type == "member":
+            if refresh_statuses_first:
+                self.refresh_statuses(save=False)
+
+            member = self.find_member_by_mobile(mobile)
+            if member is None:
+                ref_id = str(message.get("reference_id", "")).strip()
+                if ref_id:
+                    member = next((m for m in self.members if str(m.get("member_id", "")) == ref_id), None)
+                if member is None:
+                    return "العضو غير مسجل في قاعدة البيانات (قد يكون تم حذفه)"
+
+            member_status = str(member.get("current_status", "expired"))
+
+            if msg_type in ("reminder_1", "reminder_3"):
+                end_raw = str(member.get("last_subscription_end", "")).strip()
+                if not end_raw:
+                    return "العضو ليس لديه تاريخ انتهاء اشتراك مسجل"
+                end_date = parse_date(end_raw)
+                days_left = (end_date - date.today()).days
+                if member_status != "active":
+                    return f"العضو غير نشط حالياً (حالته: {status_ar(member_status)})"
+                if msg_type == "reminder_1" and self._member_is_single_session(member):
+                    return "عضو حصة واحدة (لا تنطبق عليه تذكيرات الاشتراك)"
+                expected_type = "reminder_3" if days_left == 3 else ("reminder_1" if days_left == 1 else "")
+                if msg_type != expected_type:
+                    return f"تاريخ الاشتراك تغير (المتبقي {days_left} يوم، لا يوافق موعد تذكير {3 if msg_type == 'reminder_3' else 1} أيام)"
+
+            elif msg_type == "expired":
+                end_raw = str(member.get("last_subscription_end", "")).strip()
+                if not end_raw:
+                    return "العضو ليس لديه تاريخ انتهاء اشتراك مسجل"
+                end_date = parse_date(end_raw)
+                if member_status != "expired" or end_date >= date.today():
+                    return f"العضو ليس منتهي الاشتراك حالياً (حالته: {status_ar(member_status)})"
+
+            elif not manual:
+                if member_status != "active" and not self._member_recently_paid(member, within_days=2):
+                    return f"العضو منتهي الاشتراك ({status_ar(member_status)}) ولم يسدد خلال آخر يومين"
+
+        if status == "failed" and not manual:
+            err = str(message.get("error", "")).strip()
+            return f"فشل الإرسال في محاولة سابقة ({err or 'تعذر التسليم'})"
+
+        return None
+
     def force_rebuild_due_reminders(self, save: bool = True) -> tuple[int, int]:
         self.refresh_statuses(save=True)
         removable_types = {"reminder_1", "reminder_3", "expired"}
@@ -6980,6 +7065,118 @@ class WhatsAppSendThread(QThread):
             self.done.emit({"ok": False, "ids": ids, "failed_ids": ids, "error": str(exc)})
 
 
+def show_unsendable_whatsapp_dialog(
+    parent: Optional[QWidget],
+    title: str,
+    intro_lines: List[str],
+    items: List[tuple[Dict[str, Any], str]],
+    can_proceed: bool = False,
+    proceed_button_text: str = "متابعة الإرسال",
+) -> bool:
+    """Display an explicit modal dialog stating the exact messages that cannot be sent, why, and how many."""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setLayoutDirection(Qt.RightToLeft)
+    fit_dialog_to_screen(dialog, 920, 520)
+
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(18, 18, 18, 18)
+    layout.setSpacing(12)
+
+    # Header Box
+    header_box = QFrame()
+    header_box.setObjectName("settingsBox")
+    header_layout = QVBoxLayout(header_box)
+    header_layout.setContentsMargins(14, 12, 14, 12)
+    header_layout.setSpacing(6)
+
+    title_lbl = make_label(title, "dialogTitleSmall")
+    title_lbl.setFont(QFont("Segoe UI", 11, QFont.Bold))
+    header_layout.addWidget(title_lbl)
+
+    for line in intro_lines:
+        line_lbl = make_label(line, "fieldLabel")
+        line_lbl.setWordWrap(True)
+        if "⚠️" in line or "لن يتم" in line or "فشل" in line:
+            line_lbl.setStyleSheet("color: #FFB020; font-weight: bold;")
+        elif "سيتم إرسال" in line or "تم الإرسال" in line:
+            line_lbl.setStyleSheet("color: #2ECC71; font-weight: bold;")
+        header_layout.addWidget(line_lbl)
+
+    layout.addWidget(header_box)
+
+    # Count badge
+    count_text = f"عدد الرسائل المستبعدة / التي لن تُرسل: {len(items)} رسالة"
+    count_lbl = make_label(count_text, "smallMuted")
+    count_lbl.setFont(QFont("Segoe UI", 9, QFont.Bold))
+    layout.addWidget(count_lbl)
+
+    # Table of unsendable messages
+    table = QTableWidget()
+    configure_table(table)
+    table.setAlternatingRowColors(True)
+    table.setFont(QFont("Segoe UI", 9))
+    headers = ["الاسم", "الموبايل", "النوع", "الحالة الحالية", "سبب عدم الإرسال بالتفصيل"]
+    table.setColumnCount(len(headers))
+    table.setHorizontalHeaderLabels(headers)
+    table.setRowCount(len(items))
+    table.setColumnWidth(0, 140)
+    table.setColumnWidth(1, 115)
+    table.setColumnWidth(2, 95)
+    table.setColumnWidth(3, 90)
+    table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+
+    for row_idx, (msg, reason) in enumerate(items):
+        name = str(msg.get("recipient_name", "") or msg.get("name", "عضو")).strip() or "غير محدد"
+        mobile = str(msg.get("mobile", "")).strip() or "بدون هاتف"
+        msg_type = whatsapp_type_ar(str(msg.get("type", "")))
+        status_val = whatsapp_status_ar(str(msg.get("status", "pending")))
+
+        name_cell = item(name)
+        mobile_cell = item(mobile)
+        type_cell = item(msg_type)
+        status_cell = item(status_val)
+        reason_cell = item(reason)
+        reason_cell.setForeground(Qt.GlobalColor.yellow if "مجدولة" in reason else Qt.GlobalColor.red)
+
+        table.setItem(row_idx, 0, name_cell)
+        table.setItem(row_idx, 1, mobile_cell)
+        table.setItem(row_idx, 2, type_cell)
+        table.setItem(row_idx, 3, status_cell)
+        table.setItem(row_idx, 4, reason_cell)
+        table.setRowHeight(row_idx, 32)
+
+    layout.addWidget(table, 1)
+
+    # Footer Buttons
+    btn_layout = QHBoxLayout()
+    btn_layout.setDirection(QBoxLayout.Direction.RightToLeft)
+    btn_layout.setSpacing(10)
+
+    if can_proceed:
+        cancel_btn = QPushButton("إلغاء")
+        cancel_btn.setObjectName("secondaryButton")
+        cancel_btn.setFixedHeight(32)
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        proceed_btn = QPushButton(proceed_button_text)
+        proceed_btn.setObjectName("primaryButton")
+        proceed_btn.setFixedHeight(32)
+        proceed_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(proceed_btn)
+    else:
+        close_btn = QPushButton("إغلاق")
+        close_btn.setObjectName("secondaryButton")
+        close_btn.setFixedHeight(32)
+        close_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(close_btn)
+
+    layout.addLayout(btn_layout)
+
+    return dialog.exec() == QDialog.Accepted
+
+
 class WhatsAppPage(BasePage):
     def __init__(self, store: Store, send_pending_callback) -> None:
         super().__init__(store, "واتساب", "إيصالات الدفع وتذكيرات الاشتراك وتقرير المدير بنفس منطق الإرسال القديم")
@@ -7083,6 +7280,14 @@ class WhatsAppPage(BasePage):
         send_pending_btn.clicked.connect(self.select_and_send)
         send_row.addWidget(send_pending_btn, 1)
 
+        unsendable_report_btn = QPushButton("فحص أسباب عدم الإرسال")
+        unsendable_report_btn.setObjectName("secondaryButton")
+        unsendable_report_btn.setFixedHeight(26)
+        unsendable_report_btn.setFont(QFont("Segoe UI", 8))
+        unsendable_report_btn.setToolTip("بيان الرسائل التي لن يتم إرسالها وعددها وأسباب استبعادها بالتفصيل")
+        unsendable_report_btn.clicked.connect(self.show_unsendable_report)
+        send_row.addWidget(unsendable_report_btn, 1)
+
         retry_failed_btn = QPushButton("إعادة الفاشل للمعلق")
         retry_failed_btn.setObjectName("secondaryButton")
         retry_failed_btn.setFixedHeight(26)
@@ -7174,6 +7379,46 @@ class WhatsAppPage(BasePage):
             f"تمت مراجعة الرسائل المعلقة.\nتم حذف {removed} رسالة قديمة.\nتم تجهيز {added} رسالة تذكير محدثة.",
         )
         self.refresh()
+
+    def show_unsendable_report(self) -> None:
+        """Scan all non-sent messages and display a detailed report stating which messages cannot be sent, why, and how many."""
+        candidates = [
+            m for m in self.store.whatsapp_messages
+            if str(m.get("status", "")) in ("pending", "scheduled", "failed")
+        ]
+        if not candidates:
+            QMessageBox.information(self, "واتساب", "لا توجد رسائل غير مرسلة (معلقة أو مجدولة أو فاشلة) حاليًا في النظام.")
+            return
+
+        unsendable = []
+        ready_count = 0
+        self.store.refresh_statuses(save=False)
+        for m in candidates:
+            reason = self.store.get_whatsapp_unsendable_reason(m, manual=False)
+            if reason is not None:
+                unsendable.append((m, reason))
+            else:
+                ready_count += 1
+
+        if not unsendable:
+            QMessageBox.information(
+                self,
+                "فحص الرسائل",
+                f"كل الرسائل المعلقة ({ready_count} رسالة) جاهزة وصالحة للإرسال فورًا، ولا توجد أي رسائل معطلة أو مستبعدة.",
+            )
+            return
+
+        show_unsendable_whatsapp_dialog(
+            self,
+            title="تقرير الرسائل التي لن يتم إرسالها وأسبابها",
+            intro_lines=[
+                f"• إجمالي الرسائل غير المرسلة (معلق + مجدول + فاشل): {len(candidates)} رسالة.",
+                f"• الرسائل الجاهزة والصالحة للإرسال الآن: {ready_count} رسالة.",
+                f"• ⚠️ الرسائل التي لن يتم إرسالها حاليًا: {len(unsendable)} رسالة (الأسباب موضحة بالجدول أدناه):",
+            ],
+            items=unsendable,
+            can_proceed=False,
+        )
 
     def send_manager_report_now(self) -> None:
         password = str(self.store.settings.get("dashboard_password", "1234"))
@@ -7713,10 +7958,18 @@ class WhatsAppPage(BasePage):
             checkbox.setProperty("message_id", str(msg.get("message_id", "")))
             row_layout.addWidget(checkbox)
 
-            compact_line = make_label(
-                f"{created_at} | {msg.get('recipient_name', '-') or '-'} | {msg.get('mobile', '-') or '-'} | {whatsapp_type_ar(msg_type)} | {message_short}",
-                "muted",
-            )
+            reason = self.store.get_whatsapp_unsendable_reason(msg, manual=True)
+            if reason:
+                compact_line = make_label(
+                    f"⚠️ [{reason}] | {created_at} | {msg.get('recipient_name', '-') or '-'} | {msg.get('mobile', '-') or '-'} | {whatsapp_type_ar(msg_type)} | {message_short}",
+                    "warning",
+                )
+                compact_line.setStyleSheet("color: #FFB020; font-weight: bold;")
+            else:
+                compact_line = make_label(
+                    f"{created_at} | {msg.get('recipient_name', '-') or '-'} | {msg.get('mobile', '-') or '-'} | {whatsapp_type_ar(msg_type)} | {message_short}",
+                    "muted",
+                )
             compact_line.setFont(QFont("Segoe UI", 7))
             compact_line.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             compact_line.setWordWrap(False)
@@ -9005,35 +9258,84 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "واتساب", "الإرسال شغال بالفعل، استنى لما يخلص.")
             return
         if messages is None:
-            pending = self.store.pending_whatsapp_messages(ready_only=True)
-            pending = [m for m in pending if self.store.is_whatsapp_message_allowed(m, refresh_statuses_first=True)]
+            all_candidates = [
+                m for m in self.store.whatsapp_messages
+                if str(m.get("status", "")) in ("pending", "scheduled", "failed")
+            ]
+            if types is not None:
+                all_candidates = [m for m in all_candidates if str(m.get("type", "")) in types]
+
+            self.store.refresh_statuses(save=False)
+            pending = []
+            unsendable = []
+            for m in all_candidates:
+                reason = self.store.get_whatsapp_unsendable_reason(m, manual=False)
+                if reason is None:
+                    pending.append(m)
+                else:
+                    unsendable.append((m, reason))
         else:
             pending = []
+            unsendable = []
+            self.store.refresh_statuses(save=False)
             for m in messages:
-                mob = normalize_mobile(str(m.get("mobile", "")))
-                txt = str(m.get("message", "")).strip()
-                if mob and txt:
+                if types is not None and str(m.get("type", "")) not in types:
+                    continue
+                reason = self.store.get_whatsapp_unsendable_reason(m, manual=True)
+                if reason is None:
                     m["status"] = "pending"
                     m["send_after"] = ""
+                    m["error"] = ""
                     pending.append(m)
+                else:
+                    unsendable.append((m, reason))
             if pending:
                 self.store.save_whatsapp()
-        if types is not None:
-            pending = [m for m in pending if str(m.get("type", "")) in types]
-        if not pending:
+
+        if not pending and not unsendable:
             if not silent:
-                QMessageBox.information(self, "واتساب", "لا توجد رسائل جاهزة للإرسال الآن.\nإذا كان الرقم جديدًا سيتم إضافته إلى المعلق بعد ساعة.")
+                QMessageBox.information(self, "واتساب", "لا توجد رسائل معلقة للإرسال الآن.")
             return
+
+        if not pending and unsendable:
+            if not silent:
+                show_unsendable_whatsapp_dialog(
+                    self,
+                    title="تنبيه: لا يمكن إرسال الرسائل",
+                    intro_lines=[
+                        f"تم فحص {len(unsendable)} رسالة، ولكن لا يمكن إرسال أي منها حاليًا للأسباب الموضحة أدناه:"
+                    ],
+                    items=unsendable,
+                    can_proceed=False,
+                )
+            return
+
         if not silent:
             label = "رسائل الإيصال" if types == ["receipt"] else "الرسائل المعلقة"
-            reply = QMessageBox.question(
-                self,
-                "تأكيد إرسال واتساب",
-                f"سيتم إرسال {len(pending)} {label}.\nلا تلمس الماوس أو الكيبورد حتى انتهاء الإرسال.\nهل تريد المتابعة؟",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                return
+            if unsendable:
+                proceed = show_unsendable_whatsapp_dialog(
+                    self,
+                    title="تأكيد إرسال واتساب وبيان المستبعد",
+                    intro_lines=[
+                        f"• سيتم إرسال {len(pending)} {label}.",
+                        f"• ⚠️ تنبيه: هناك {len(unsendable)} رسالة لن يتم إرسالها للأسباب الموضحة بالجدول أدناه:",
+                        "لا تلمس الماوس أو الكيبورد أثناء الإرسال. هل تريد المتابعة؟",
+                    ],
+                    items=unsendable,
+                    can_proceed=True,
+                    proceed_button_text=f"متابعة إرسال الـ ({len(pending)}) رسالة الجاهزة",
+                )
+                if not proceed:
+                    return
+            else:
+                reply = QMessageBox.question(
+                    self,
+                    "تأكيد إرسال واتساب",
+                    f"سيتم إرسال {len(pending)} {label}.\nجميع الرسائل المحددة جاهزة وصالحة للإرسال (0 رسائل مستبعدة).\nلا تلمس الماوس أو الكيبورد حتى انتهاء الإرسال.\nهل تريد المتابعة؟",
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return
         self.whatsapp_silent = silent
         self.whatsapp_thread = WhatsAppSendThread(pending, self.store.settings)
         self.whatsapp_thread.progress.connect(self.on_whatsapp_progress)
@@ -9100,9 +9402,27 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("انتهى إرسال واتساب.", 5000)
         if not self.whatsapp_silent:
             if result.get("ok") and not failed_ids:
-                QMessageBox.information(self, "واتساب", "تم إرسال الرسائل المعلقة.")
+                QMessageBox.information(self, "واتساب", f"تم إرسال جميع الرسائل بنجاح ({len(ids)} رسالة).")
             elif result.get("ok"):
-                QMessageBox.warning(self, "واتساب", f"تم الإرسال مع فشل {len(failed_ids)} رسالة.")
+                failed_items = []
+                for msg_id in failed_ids:
+                    msg = next((m for m in self.store.whatsapp_messages if str(m.get("message_id", "")) == msg_id), None)
+                    if msg:
+                        err_msg = str(msg.get("error", "")).strip() or "لم يتم التسليم عبر واتساب (الرقم غير مسجل على واتساب أو لم يستجب)"
+                        failed_items.append((msg, err_msg))
+                    else:
+                        failed_items.append(({"message_id": msg_id, "recipient_name": "عضو", "mobile": "-"}, "تعذر التسليم عبر واتساب"))
+                success_count = max(0, len(ids) - len(failed_ids))
+                show_unsendable_whatsapp_dialog(
+                    self,
+                    title="تقرير نتائج إرسال واتساب",
+                    intro_lines=[
+                        f"• تم الإرسال بنجاح إلى: {success_count} رسالة.",
+                        f"• ⚠️ فشل الإرسال إلى: {len(failed_ids)} رسالة للأسباب الموضحة بالجدول أدناه:",
+                    ],
+                    items=failed_items,
+                    can_proceed=False,
+                )
             else:
                 QMessageBox.warning(self, "واتساب", f"فشل إرسال رسائل واتساب: {error}")
 
