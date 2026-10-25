@@ -6826,8 +6826,9 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
         return
 
     store.esp_enrollment_active = True
-    progress = QProgressDialog("جاري تسجيل البصمة... ضع الإصبع على القارئ", "إلغاء", 0, 0, parent)
-    progress.setWindowTitle("تسجيل بصمة")
+    progress = QProgressDialog("تسجيل بصمة العضو:\nالخطوة 1 من 2: ضع إصبعك بثبات على القارئ", "إلغاء", 0, 0, parent)
+    progress.setWindowTitle("تسجيل بصمة عضو")
+    progress.setMinimumWidth(420)
     progress.setWindowModality(Qt.WindowModal)
     progress.setMinimumDuration(0)
     cancelled = {"value": False, "finished": False}
@@ -6835,12 +6836,35 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
     progress._esp_thread = thread
     status_thread_holder: Dict[str, Optional[ESPOperationThread]] = {"thread": None}
     status_timer = QTimer(progress)
-    status_timer.setInterval(1_000)
+    status_timer.setInterval(700)
     status_timer_active = {"value": True}
+
+    ENROLL_STEPS_AR = {
+        "waiting_first_finger": "الخطوة 1 من 2: ضع إصبعك بثبات على القارئ",
+        "waiting_finger_removal": "ممتاز! ارفع إصبعك الآن عن القارئ...",
+        "waiting_second_finger": "الخطوة 2 من 2: ضع نفس الإصبع مرة أخرى للتأكيد",
+        "waiting_retry_removal": "أعد رفع الإصبع ثم وضعه بزاوية مستقيمة...",
+        "creating_template": "جاري معالجة ومطابقة بصمة الإصبع...",
+        "saving": "جاري حفظ البصمة في الذاكرة...",
+        "completed": "تم تسجيل البصمة بنجاح!",
+        "failed": "فشل تسجيل البصمة",
+        "cancelled": "تم إلغاء التسجيل",
+    }
+
+    ENROLL_ERRORS_AR = {
+        "first_scan_timeout": "انتهت المهلة قبل وضع الإصبع الأول",
+        "remove_finger_timeout": "انتهت المهلة قبل رفع الإصبع",
+        "second_scan_timeout": "انتهت المهلة قبل وضع الإصبع للمرة الثانية",
+        "first_scan_failed": "فشل التقاط صورة البصمة الأولى - يرجى الضغط بثبات",
+        "second_scan_failed": "فشل التقاط صورة البصمة الثانية - يرجى الضغط بثبات",
+        "template_mismatch": "البصمتان غير متطابقتين - تأكد من وضع نفس الإصبع في المرتين",
+        "save_failed": "فشل حفظ البصمة في ذاكرة الحساس",
+        "cancelled": "تم إلغاء التسجيل",
+    }
 
     def finished(result: Dict[str, Any]) -> None:
         if result.get("started") is True:
-            progress.setLabelText("جاري التسجيل... انتظر وضع الإصبع الأول")
+            progress.setLabelText("تسجيل بصمة العضو:\nالخطوة 1 من 2: ضع إصبعك بثبات على القارئ")
             status_timer.start()
             return
         if cancelled["finished"]:
@@ -6875,10 +6899,11 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
                 "لا تضغط Retry ولا تبدأ تسجيلًا جديدًا قبل مراجعة Serial Monitor الخاص بـ ESP.",
             )
             return
+        error_ar = ENROLL_ERRORS_AR.get(error, error)
         reply = QMessageBox.question(
             parent,
             "فشل تسجيل البصمة",
-            f"ENROLL FAILED: {error}\nهل تريد المحاولة مرة أخرى؟",
+            f"سبب الخطأ: {error_ar}\n\nهل تريد المحاولة مرة أخرى؟",
             QMessageBox.Retry | QMessageBox.Cancel,
             QMessageBox.Retry,
         )
@@ -6938,7 +6963,9 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
             elif result.get("cancelled") is True or result.get("error"):
                 finished({"success": False, "error": result.get("error", "cancelled")})
             else:
-                progress.setLabelText(f"جاري تسجيل البصمة... {result.get('step', 'انتظار الإصبع')}")
+                step = result.get("step", "")
+                step_text = ENROLL_STEPS_AR.get(step, f"جاري التسجيل... ({step})")
+                progress.setLabelText(f"تسجيل بصمة العضو:\n{step_text}")
 
         status_thread.done.connect(status_finished)
         status_thread.finished.connect(status_thread.deleteLater)
@@ -8475,7 +8502,7 @@ class MainWindow(QMainWindow):
         self.esp_scan_thread: Optional[ESPOperationThread] = None
         self.esp_display_thread: Optional[ESPOperationThread] = None
         self.esp_scan_poll_timer = QTimer(self)
-        self.esp_scan_poll_timer.setInterval(5_000)
+        self.esp_scan_poll_timer.setInterval(800)
         self.esp_scan_poll_timer.timeout.connect(self.poll_esp_last_scan)
         self.last_scan_sequence: Optional[int] = None
         self.scan_popup: Optional[QMessageBox] = None
@@ -8587,12 +8614,10 @@ class MainWindow(QMainWindow):
         def scan_done(result: Dict[str, Any]) -> None:
             if result.get("success") is not True:
                 return
-            if result.get("scan_active") is not True:
+            sequence = result.get("sequence")
+            if not isinstance(sequence, int) or sequence <= 0 or sequence == self.last_scan_sequence:
                 return
             if not str(result.get("member_id", "")).strip() or result.get("fingerprint_id", 0) in (0, None):
-                return
-            sequence = result.get("sequence")
-            if not isinstance(sequence, int) or sequence == self.last_scan_sequence:
                 return
             self.last_scan_sequence = sequence
             self.handle_esp_scan(result)

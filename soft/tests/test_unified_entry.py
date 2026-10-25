@@ -4,6 +4,9 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+import sys
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 SPEC = ROOT / 'app.py'
 
 spec = importlib.util.spec_from_file_location('hulk_gym_app', SPEC)

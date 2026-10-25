@@ -41,11 +41,11 @@ def write_message(message: str, char_delay: float = None, use_paste_mode: bool =
     if not message:
         return
 
-    if use_paste_mode:
+    if True:
         try:
             copy(message)
             random_delay(3, 5)
-            pyautogui.hotkey('ctrl', 'v')
+            pyautogui.hotkey('ctrl', 'v',1)
             random_delay(2,3)
             return
         except Exception:
@@ -481,9 +481,9 @@ def send_message(phone: str, message: str = "", image: str = None, topic: str = 
     press("enter")
     random_delay(2.3, 3.5)
     
-
-    write_message(message, use_paste_mode=(MESSAGE_SEND_MODE == "paste"), char_delay=MESSAGE_CHAR_DELAY)
-
+    copy(message)
+    random_delay(3, 5)
+    pyautogui.hotkey('ctrl', 'v',interval=1.1)
     random_delay(2.4, 4.8)
     print("typing5")
 
@@ -629,7 +629,6 @@ if __name__ == "__main__":
     image = "whatsapp_sender\image copy.png"
     sending(["01080922432"],["صلي علي سيدنا محمد صلي الله عليه وسلم"])
     #pyautogui.mouseInfo()
-    print(f"total: {len(numbers)}")
     print(f"Sent: {len(sent)}")
     print(f"Unsent: {len(unsent)}")
     print(f"\n\nSent numbers: {sent}")

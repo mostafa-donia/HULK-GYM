@@ -206,6 +206,10 @@ uint16_t displayFingerprintID = 0;
 bool displayAllowed = false;
 int displayDaysLeft = 0;
 
+uint16_t lastScanFingerprintID = 0;
+bool lastScanAllowed = false;
+unsigned long lastScanTimestamp = 0;
+
 
 // =====================================================
 // FINGERPRINT COLOR
@@ -1253,11 +1257,16 @@ void handleLastScan()
   String memberID;
   bool allowed = false;
 
+  uint16_t targetFpId = (lastScanFingerprintID > 0) ? lastScanFingerprintID : displayFingerprintID;
+  bool targetAllowed = (lastScanFingerprintID > 0) ? lastScanAllowed : displayAllowed;
+
   bool found = findMemberByFingerprint(
-    displayFingerprintID,
+    targetFpId,
     memberID,
     allowed
   );
+
+  bool scanActive = (targetFpId > 0) && (millis() - lastScanTimestamp < 15000);
 
   String json;
 
@@ -1269,17 +1278,17 @@ void handleLastScan()
   json += String(scanSequence);
   json += ",";
   json += "\"fingerprint_id\":";
-  json += String(displayFingerprintID);
+  json += String(targetFpId);
   json += ",";
   json += "\"member_id\":";
   json += "\"";
   json += found ? memberID : "";
   json += "\",";
   json += "\"allowed\":";
-  json += displayAllowed ? "true" : "false";
+  json += targetAllowed ? "true" : "false";
   json += ",";
   json += "\"scan_active\":";
-  json += memberDisplayActive ? "true" : "false";
+  json += scanActive ? "true" : "false";
   json += "}";
 
   server.send(200, "application/json", json);
@@ -2242,10 +2251,14 @@ void searchFingerprint()
   DBG("[SCAN] showScanning() DONE");
 
 
-  // Wait a little so the
-  // scanner has a stable image
-
-  delay(50);
+  // Wait a moment for stable finger contact, then re-acquire image
+  delay(100);
+  p = finger.getImage();
+  if (p != FINGERPRINT_OK)
+  {
+    delay(50);
+    p = finger.getImage();
+  }
 
 
   if (
@@ -2291,6 +2304,15 @@ void searchFingerprint()
   DBG_PRINT("[SCAN] fingerFastSearch result = ");
   DBG(p);
 
+  // Fallback: if fast heuristic search fails to match, do a full database search
+  if (p == FINGERPRINT_NOTFOUND)
+  {
+    DBG("[SCAN] Fast search returned NOTFOUND, trying full fingerSearch()...");
+    p = finger.fingerSearch();
+    DBG_PRINT("[SCAN] fingerSearch fallback result = ");
+    DBG(p);
+  }
+
 
   if (
     p == FINGERPRINT_OK
@@ -2303,10 +2325,12 @@ void searchFingerprint()
       finger.confidence;
 
     Serial.print("[R307] ID: ");
-    Serial.println(fingerprintID);
-
-    Serial.print("[R307] Confidence: ");
-    Serial.println(confidence);
+    Serial.print(fingerprintID);
+    Serial.print(" | Confidence: ");
+    Serial.print(confidence);
+    Serial.print(" (Min: ");
+    Serial.print(minMatchScore);
+    Serial.println(")");
 
     // =================================================
     // MANUAL MATCH SCORE CHECK
@@ -2338,10 +2362,13 @@ void searchFingerprint()
     DBG_PRINT("[SCAN] isFingerprintAllowed = ");
     DBG(allowed ? "TRUE" : "FALSE");
 
-    // Store ONLY the lightweight scan event.
+    // Store lightweight scan event.
     DBG("[SCAN] Setting scan display state");
     displayFingerprintID = fingerprintID;
     displayAllowed = allowed;
+    lastScanFingerprintID = fingerprintID;
+    lastScanAllowed = allowed;
+    lastScanTimestamp = millis();
     scanSequence++;
     DBG_PRINT("[SCAN] scanSequence = ");
     DBG(scanSequence);
@@ -2384,7 +2411,7 @@ void searchFingerprint()
   {
     logDiag("[NOT_FOUND]", "No match found in fingerprint database");
     DBG("[SCAN] FINGERPRINT NOT FOUND");
-    Serial.println("[ACCESS] FINGERPRINT NOT FOUND");
+    Serial.println("[ACCESS] FINGERPRINT NOT FOUND (No match in database)");
 
     DBG("[SCAN] Calling showDenied()");
     showDenied(FINGERPRINT_NOT_FOUND_DELAY);
@@ -2677,8 +2704,8 @@ void startAsyncEnrollment(int id, const String &memberID)
   displayDaysLeft = 0;
 
   clearDynamicArea();
-  setStatus("ENROLL", TFT_CYAN);
-  setMessage("Place Finger");
+  setStatus("ENROLL [1/2]", TFT_CYAN);
+  setMessage("Place Finger Firmly");
   Serial.println("[ENROLL] ASYNC START");
   Serial.print("[ENROLL] Member ID: "); Serial.println(memberID);
   Serial.print("[ENROLL] Fingerprint ID: "); Serial.println(id);
@@ -2723,18 +2750,22 @@ void processAsyncEnrollment()
         p = finger.image2Tz(1);
         if (p == FINGERPRINT_OK)
         {
-          Serial.println("[ENROLL] FIRST IMAGE CAPTURED SUCCESSFULLY");
-          setMessage("Remove Finger");
+          Serial.println("[ENROLL] STEP 1 OK: First image captured");
+          playAudio(1);
+          setStatus("STEP [1/2] OK", TFT_GREEN);
+          setMessage("Lift Finger Now");
           asyncEnrollState = ENROLL_REMOVE_FIRST;
           asyncEnrollStateStarted = millis();
         }
         else
         {
+          Serial.println("[ENROLL] STEP 1 ERROR: Could not extract features");
           finishAsyncEnrollment(false, false, "first_scan_failed"); delay(1000); showReady();
         }
       }
       else if (elapsed >= ASYNC_FIRST_TIMEOUT)
       {
+        Serial.println("[ENROLL] TIMEOUT: First finger not placed");
         finishAsyncEnrollment(false, false, "first_scan_timeout"); delay(1000); showReady();
       }
       break;
@@ -2743,14 +2774,16 @@ void processAsyncEnrollment()
       p = finger.getImage();
       if (p == FINGERPRINT_NOFINGER)
       {
-        Serial.println("[ENROLL] FINGER REMOVED - MOVING TO SECOND SCAN");
+        Serial.println("[ENROLL] FINGER REMOVED: Ready for second scan");
         asyncEnrollSecondAttempts = 0;
-        setMessage("Place Finger Again");
+        setStatus("STEP [2/2]", TFT_CYAN);
+        setMessage("Place Same Finger");
         asyncEnrollState = ENROLL_WAIT_SECOND;
         asyncEnrollStateStarted = millis();
       }
       else if (elapsed >= ASYNC_REMOVE_TIMEOUT)
       {
+        Serial.println("[ENROLL] TIMEOUT: Finger not lifted");
         finishAsyncEnrollment(false, false, "remove_finger_timeout"); delay(1000); showReady();
       }
       break;
@@ -2762,7 +2795,8 @@ void processAsyncEnrollment()
         p = finger.image2Tz(2);
         if (p == FINGERPRINT_OK)
         {
-          Serial.println("[ENROLL] SECOND IMAGE CAPTURED SUCCESSFULLY");
+          Serial.println("[ENROLL] STEP 2 OK: Second image captured");
+          setStatus("PROCESSING", TFT_MAGENTA);
           setMessage("Creating Template...");
           asyncEnrollState = ENROLL_CREATE_MODEL;
           asyncEnrollStateStarted = millis();
@@ -2777,7 +2811,8 @@ void processAsyncEnrollment()
           }
           else
           {
-            setMessage("Remove Finger");
+            setStatus("RETRY [2/2]", TFT_YELLOW);
+            setMessage("Lift Finger Then Place");
             asyncEnrollState = ENROLL_RETRY_REMOVE;
             asyncEnrollStateStarted = millis();
           }
@@ -2785,6 +2820,7 @@ void processAsyncEnrollment()
       }
       else if (elapsed >= ASYNC_SECOND_TIMEOUT)
       {
+        Serial.println("[ENROLL] TIMEOUT: Second finger not placed");
         finishAsyncEnrollment(false, false, "second_scan_timeout"); delay(1000); showReady();
       }
       break;
@@ -2793,7 +2829,8 @@ void processAsyncEnrollment()
       p = finger.getImage();
       if (p == FINGERPRINT_NOFINGER || elapsed >= ASYNC_RETRY_REMOVE_TIMEOUT)
       {
-        setMessage("Place Finger Again");
+        setStatus("STEP [2/2]", TFT_CYAN);
+        setMessage("Place Same Finger");
         asyncEnrollState = ENROLL_WAIT_SECOND;
         asyncEnrollStateStarted = millis();
       }
@@ -2803,8 +2840,9 @@ void processAsyncEnrollment()
       p = finger.createModel();
       if (p == FINGERPRINT_OK)
       {
-        Serial.println("[ENROLL] Template created successfully");
-        setMessage("Saving...");
+        Serial.println("[ENROLL] Template model matched and created");
+        setStatus("SAVING", TFT_CYAN);
+        setMessage("Saving To Sensor...");
         asyncEnrollState = ENROLL_SAVE;
         asyncEnrollStateStarted = millis();
       }
@@ -2812,13 +2850,15 @@ void processAsyncEnrollment()
       {
         asyncEnrollMismatchRetries++;
         Serial.print("[ENROLL] Template mismatch - retry "); Serial.println(asyncEnrollMismatchRetries);
-        setMessage("Try Different Angle");
+        setStatus("MISMATCH", TFT_YELLOW);
+        setMessage("Lift & Try Again");
         asyncEnrollState = ENROLL_RETRY_REMOVE;
         asyncEnrollStateStarted = millis();
       }
       else
       {
-        finishAsyncEnrollment(false, false, "finger_mismatch"); delay(1000); showReady();
+        Serial.println("[ENROLL] ERROR: Prints do not match");
+        finishAsyncEnrollment(false, false, "template_mismatch"); delay(1500); showReady();
       }
       break;
 
@@ -2826,11 +2866,21 @@ void processAsyncEnrollment()
       p = finger.storeModel(asyncEnrollFingerprintID);
       if (p == FINGERPRINT_OK)
       {
-        Serial.println("[ENROLL] Saved Successfully");
+        Serial.print("[ENROLL] SUCCESS: Saved as ID #"); Serial.println(asyncEnrollFingerprintID);
+        logDiag("[ENROLL]", "Fingerprint enrolled successfully as ID #" + String(asyncEnrollFingerprintID));
+        playAudio(2);
         finishAsyncEnrollment(true, false, "");
+        delay(2000);
+        showReady();
       }
-      else finishAsyncEnrollment(false, false, "store_failed");
-      delay(1000); showReady();
+      else
+      {
+        Serial.print("[ENROLL] ERROR: Failed to store template (code "); Serial.print(p); Serial.println(")");
+        logDiag("[ERROR]", "Failed to store fingerprint model (code " + String(p) + ")");
+        finishAsyncEnrollment(false, false, "save_failed");
+        delay(1500);
+        showReady();
+      }
       break;
 
     default: break;
