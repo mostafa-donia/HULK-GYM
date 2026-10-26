@@ -46,10 +46,12 @@ class WhatsAppRateLimiterTests(unittest.TestCase):
         original_ready = module.whatsupp_ready
         original_wait = module.WhatsAppRateLimiter.wait_until_allowed
         original_send = module.send_message
+        original_layout = getattr(module, 'set_keyboard_layout_to_english', None)
         captured = {}
 
         module.whatsupp_ready = lambda: None
         module.WhatsAppRateLimiter.wait_until_allowed = lambda self, *args, **kwargs: True
+        module.set_keyboard_layout_to_english = lambda: None
 
         def fake_send(phone, message, image=None, topic=None, message_bank=None, context=None):
             captured['phone'] = phone
@@ -71,6 +73,8 @@ class WhatsAppRateLimiterTests(unittest.TestCase):
             module.whatsupp_ready = original_ready
             module.WhatsAppRateLimiter.wait_until_allowed = original_wait
             module.send_message = original_send
+            if original_layout is not None:
+                module.set_keyboard_layout_to_english = original_layout
 
     def test_placeholder_formatting_substitutes_context_values(self):
         message_with_placeholders = "أهلاً {name}، شكراً لدفعك {amount_paid} ريال في {date}. المتبقي: {remaining_amount} ريال."

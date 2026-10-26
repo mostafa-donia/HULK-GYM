@@ -8653,7 +8653,23 @@ class MainWindow(QMainWindow):
     def show_scan_popup(self, member_data: Dict[str, Any]) -> None:
         if self.scan_popup is not None:
             self.scan_popup.close()
-        access = "مسموح بالدخول" if member_data["allowed"] else "الدخول مرفوض"
+        allowed = bool(member_data.get("allowed", False))
+        days_left = member_data.get("days_left", 0)
+
+        if allowed:
+            access = "مسموح بالدخول ✓"
+            days_summary = f"الأيام المتبقية: {days_left} يوم"
+            status_color = "#61e294"
+        else:
+            access = "الدخول مرفوض - اشتراك منتهي ✕"
+            if days_left < 0:
+                days_summary = f"الاشتراك منتهي منذ {-days_left} يوم"
+            elif days_left == 0:
+                days_summary = "الاشتراك منتهي اليوم"
+            else:
+                days_summary = "الاشتراك منتهي"
+            status_color = "#ff6b6b"
+
         popup = QDialog(self)
         popup.setWindowTitle("ملف العضو")
         popup.setLayoutDirection(Qt.RightToLeft)
@@ -8669,7 +8685,7 @@ class MainWindow(QMainWindow):
 
         icon = QLabel("👤")
         icon.setAlignment(Qt.AlignCenter)
-        icon.setStyleSheet("font-size: 96px; color: #a8f05a;")
+        icon.setStyleSheet(f"font-size: 96px; color: {status_color};")
         layout.addWidget(icon)
 
         name_label = QLabel(member_data["name"] or "عضو")
@@ -8680,9 +8696,16 @@ class MainWindow(QMainWindow):
         access_label = QLabel(access)
         access_label.setAlignment(Qt.AlignCenter)
         access_label.setStyleSheet(
-            f"font-size: 30px; font-weight: 800; color: {'#61e294' if member_data['allowed'] else '#ff6b6b'};"
+            f"font-size: 30px; font-weight: 800; color: {status_color};"
         )
         layout.addWidget(access_label)
+
+        days_label = QLabel(days_summary)
+        days_label.setAlignment(Qt.AlignCenter)
+        days_label.setStyleSheet(
+            f"font-size: 26px; font-weight: 700; color: {'#a8f05a' if allowed else '#ffca28'};"
+        )
+        layout.addWidget(days_label)
 
         details = QLabel(
             f"رقم العضو: {member_data['member_id']}\n"
@@ -8692,7 +8715,7 @@ class MainWindow(QMainWindow):
             f"آخر دفع: {member_data['last_payment']}"
         )
         details.setAlignment(Qt.AlignCenter)
-        details.setStyleSheet("font-size: 25px; line-height: 1.5; color: #f1f5f9;")
+        details.setStyleSheet("font-size: 22px; line-height: 1.5; color: #f1f5f9;")
         layout.addWidget(details)
         layout.addStretch(1)
 

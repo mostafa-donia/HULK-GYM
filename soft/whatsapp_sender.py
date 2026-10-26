@@ -295,8 +295,11 @@ def set_keyboard_layout_to_english():
         return
 
     print("[set_keyboard_layout_to_english_once] Sending Alt+Shift once to switch layout.")
-    pyautogui.hotkey("alt", "shift")
-    sleep(0.25)
+    try:
+        pyautogui.hotkey("alt", "shift")
+        sleep(0.25)
+    except Exception as exc:
+        print(f"[set_keyboard_layout_to_english_once] Switch layout skipped/failed: {exc}")
 
     hkl_after = ctypes.windll.user32.GetKeyboardLayout(0)
     current_lang_after = language_map.get(hkl_after & 0xFFFF, f"0x{(hkl_after & 0xFFFF):04X}")

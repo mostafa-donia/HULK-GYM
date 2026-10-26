@@ -280,7 +280,8 @@ void clearDynamicArea();
 void showReady();
 void showScanning();
 void showGranted();
-void showDenied(unsigned long duration = FINGERPRINT_KNOWN_RESULT_DELAY);
+void showExpired(unsigned long duration = FINGERPRINT_KNOWN_RESULT_DELAY);
+void showDenied(unsigned long duration = FINGERPRINT_NOT_FOUND_DELAY);
 
 void showMemberInfo();
 void updateMemberDisplay();
@@ -1457,24 +1458,39 @@ void showMemberInfo()
 
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     String name = displayName;
-    if (name.length() > 24) name = name.substring(0, 24);
-    tft.drawString(name, 160, 370, 4);
+    if (name.length() > 22) name = name.substring(0, 22);
+    tft.drawString(name, 160, 368, 4);
 
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
     tft.drawString("Days left: " + String(displayDaysLeft), 160, 405, 4);
   }
   else
   {
     tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("Sorry", 160, 332, 4);
+    tft.drawString("Expired", 160, 332, 4);
 
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     String name = displayName;
-    if (name.length() > 24) name = name.substring(0, 24);
-    tft.drawString(name, 160, 370, 2);
+    if (name.length() > 22) name = name.substring(0, 22);
+    tft.drawString(name, 160, 368, 4);
 
-    String endLine = "Ended at: " + displayEndDate;
-    if (endLine.length() > 30) endLine = endLine.substring(0, 30);
-    tft.drawString(endLine, 160, 405, 4);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    String expLine;
+    if (displayDaysLeft < 0)
+    {
+      int daysAgo = -displayDaysLeft;
+      expLine = "Expired " + String(daysAgo) + (daysAgo == 1 ? " day ago" : " days ago");
+    }
+    else if (displayDaysLeft == 0)
+    {
+      expLine = "Expired today";
+    }
+    else
+    {
+      expLine = "Ended: " + displayEndDate;
+    }
+    if (expLine.length() > 26) expLine = expLine.substring(0, 26);
+    tft.drawString(expLine, 160, 405, 4);
   }
 }
 
@@ -2145,9 +2161,9 @@ void showGranted()
     TFT_BLACK
   );
 
-      setMessage(
-    "ID : " +
-    String(finger.fingerID)  );
+  setMessage(
+    "Welcome"
+  );
 
 
 
@@ -2175,7 +2191,40 @@ void showGranted()
 
 
 // =====================================================
-// DENIED
+// EXPIRED (KNOWN MEMBER, BUT SUBSCRIPTION EXPIRED)
+// =====================================================
+
+void showExpired(unsigned long duration)
+{
+  setRGB(true, false, false);
+  searchMode = false;
+
+  clearDynamicArea();
+
+  drawFingerprint(
+    TFT_RED
+  );
+
+  setStatus(
+    "EXPIRED",
+    TFT_RED
+  );
+
+  setMessage(
+    "Subscription Expired"
+  );
+
+  Serial.println(
+    "[STATUS] SUBSCRIPTION EXPIRED"
+  );
+
+  memberDisplayActive = true;
+  memberDisplayUntil = millis() + duration;
+}
+
+
+// =====================================================
+// DENIED (NOT FOUND / LOW SCORE / NO MATCH)
 // =====================================================
 
 void showDenied(unsigned long duration)
@@ -2193,7 +2242,7 @@ void showDenied(unsigned long duration)
 
 
   setStatus(
-    "ACCESS DENIED",
+    "NOT FOUND",
     TFT_RED
   );
 
@@ -2403,7 +2452,7 @@ void searchFingerprint()
     }
     else
     {
-      showDenied(FINGERPRINT_KNOWN_RESULT_DELAY);
+      showExpired(FINGERPRINT_KNOWN_RESULT_DELAY);
     }
     DBG("[SCAN] local access display DONE");
   }
