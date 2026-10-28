@@ -7294,7 +7294,7 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
 
     def finished(result: Dict[str, Any]) -> None:
         if result.get("started") is True:
-            progress.setLabelText("تسجيل بصمة العضو:\nالخطوة [1/4]: ضع إصبعك بثبات على القارئ")
+            progress.setLabelText("تسجيل بصمة العضو:\nالخطوة [1/2]: ضع إصبعك بثبات على القارئ")
             status_timer.start()
             return
         if cancelled["finished"]:

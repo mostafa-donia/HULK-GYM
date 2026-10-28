@@ -45,7 +45,11 @@ def write_message(message: str, char_delay: float = None, use_paste_mode: bool =
         try:
             copy(message)
             random_delay(3, 5)
-            pyautogui.hotkey('ctrl', 'v',1)
+            pyautogui.keyDown('ctrl')
+            random_delay()
+            pyautogui.press('v')
+            random_delay()
+            pyautogui.keyUp('ctrl')
             random_delay(2,3)
             return
         except Exception:
@@ -478,7 +482,7 @@ def send_message(phone: str, message: str = "", image: str = None, topic: str = 
     random_delay(1.02, 2.12)
     press(" ")
     random_delay(0.72, 1.22)
-    write(phone, interval=0.1)
+    write(phone)
     random_delay(3.1, 5.4)
 
     press("enter")
