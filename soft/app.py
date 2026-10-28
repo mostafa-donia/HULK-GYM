@@ -26,6 +26,14 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import esp_client
 
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display as bidi_get_display
+    from PIL import Image as PILImage, ImageDraw as PILImageDraw, ImageFont as PILImageFont
+    HAS_PIL_ARABIC = True
+except Exception:
+    HAS_PIL_ARABIC = False
+
 ESP_SYNC_LOCK = threading.Lock()
 
 try:
@@ -97,6 +105,54 @@ def debug_log(message: str) -> None:
             f.write(line + "\n")
     except Exception:
         pass
+
+
+def render_arabic_text_to_hex(text: str, max_width: int = 250, initial_size: int = 20) -> tuple[int, int, str]:
+    """Render shaped & BiDi-ordered Arabic text into a 1-bit MSB-first hex bitmap string for ESP32 TFT display."""
+    if not text or not HAS_PIL_ARABIC:
+        return 0, 0, ""
+    try:
+        font_path = "C:/Windows/Fonts/tahoma.ttf"
+        current_size = initial_size
+        bbox = (0, 0, 1, 1)
+        shaped = text
+        font = None
+        while current_size >= 12:
+            try:
+                font = PILImageFont.truetype(font_path, current_size)
+            except Exception:
+                font = PILImageFont.load_default()
+            try:
+                shaped = bidi_get_display(arabic_reshaper.reshape(text))
+            except Exception:
+                shaped = text
+            dummy = PILImage.new("1", (1, 1), 0)
+            draw = PILImageDraw.Draw(dummy)
+            bbox = draw.textbbox((0, 0), shaped, font=font)
+            w = max(1, bbox[2] - bbox[0])
+            if w <= max_width or current_size <= 12:
+                break
+            current_size -= 2
+
+        w = max(1, bbox[2] - bbox[0])
+        h = max(1, bbox[3] - bbox[1])
+        img = PILImage.new("1", (w, h), 0)
+        d = PILImageDraw.Draw(img)
+        d.text((-bbox[0], -bbox[1]), shaped, font=font, fill=1)
+        byte_width = (w + 7) // 8
+        hex_chars = []
+        for y in range(h):
+            for bx in range(byte_width):
+                byte_val = 0
+                for bit in range(8):
+                    px = bx * 8 + bit
+                    if px < w and img.getpixel((px, y)):
+                        byte_val |= (0x80 >> bit)
+                hex_chars.append(f"{byte_val:02X}")
+        return w, h, "".join(hex_chars)
+    except Exception as exc:
+        debug_log(f"render_arabic_text_to_hex error: {exc}")
+        return 0, 0, ""
 
 
 # -----------------------------
@@ -8869,16 +8925,40 @@ class MainWindow(QMainWindow):
         member = next((m for m in self.store.members if str(m.get("member_id", "")) == member_id), None)
         if member is None:
             return
+
+        name = str(member.get("name", ""))
+        days_left = calculate_days_left(member.get("last_subscription_end", ""))
+        allowed = bool(scan.get("allowed", False))
+
+        # Render shaped & BiDi-ordered 1-bit hex bitmaps for ESP32 TFT display
+        name_w, name_h, name_hex = render_arabic_text_to_hex(name, max_width=250, initial_size=20)
+        if allowed:
+            days_text = f"متبقي: {days_left} يوم"
+        else:
+            if days_left < 0:
+                days_text = f"منتهي منذ: {-days_left} يوم"
+            elif days_left == 0:
+                days_text = "انتهى الاشتراك اليوم"
+            else:
+                days_text = f"انتهى: {display_date(member.get('last_subscription_end', ''))}"
+        days_w, days_h, days_hex = render_arabic_text_to_hex(days_text, max_width=250, initial_size=18)
+
         member_data = {
             "sequence": scan.get("sequence"),
-            "name": str(member.get("name", "")),
+            "name": name,
+            "name_w": name_w,
+            "name_h": name_h,
+            "name_hex": name_hex,
+            "days_w": days_w,
+            "days_h": days_h,
+            "days_hex": days_hex,
             "member_id": member_id,
             "plan_type": str(member.get("last_subscription_type", "")),
             "end_date": display_date(member.get("last_subscription_end", "")),
             "last_payment": str(member.get("last_payment_date", "")),
-            "days_left": calculate_days_left(member.get("last_subscription_end", "")),
+            "days_left": days_left,
             "fingerprint_id": scan.get("fingerprint_id", member.get("fingerprint_id", "")),
-            "allowed": bool(scan.get("allowed", False)),
+            "allowed": allowed,
         }
         self.show_scan_popup(member_data)
         if self.store.esp_command_allowed():

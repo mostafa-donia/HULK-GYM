@@ -199,6 +199,12 @@ unsigned long memberDisplayUntil = 0;
 unsigned long scanSequence = 0;
 
 String displayName = "";
+String displayNameHex = "";
+int displayNameW = 0;
+int displayNameH = 0;
+String displayDaysHex = "";
+int displayDaysW = 0;
+int displayDaysH = 0;
 String displayMemberID = "";
 String displayPlanType = "";
 String displayEndDate = "";
@@ -1343,6 +1349,24 @@ void handleDisplayMember()
   const char* name =
     doc["name"] | "";
 
+  const char* nameHex =
+    doc["name_hex"] | "";
+
+  int nameW =
+    doc["name_w"] | 0;
+
+  int nameH =
+    doc["name_h"] | 0;
+
+  const char* daysHex =
+    doc["days_hex"] | "";
+
+  int daysW =
+    doc["days_w"] | 0;
+
+  int daysH =
+    doc["days_h"] | 0;
+
   const char* memberID =
     doc["member_id"] | "";
 
@@ -1397,6 +1421,12 @@ void handleDisplayMember()
 
   // Temporary RAM only.
   displayName = name;
+  displayNameHex = nameHex;
+  displayNameW = nameW;
+  displayNameH = nameH;
+  displayDaysHex = daysHex;
+  displayDaysW = daysW;
+  displayDaysH = daysH;
   displayMemberID = memberID;
   displayPlanType = plan;
   displayEndDate = endDate;
@@ -1459,39 +1489,59 @@ void showMemberInfo()
   {
     drawBitmap1BitFast(160 - (AR_MSG_WELCOME_W / 2), 325, AR_MSG_WELCOME_DATA, AR_MSG_WELCOME_W, AR_MSG_WELCOME_H, TFT_GREEN);
 
-    String name = displayName;
-    if (name.length() > 0)
+    if (displayNameHex.length() > 0 && displayNameW > 0 && displayNameH > 0)
     {
-      drawArabicDynamicText(name, 160, 360, TFT_WHITE);
+      drawHexBitmap1Bit(160 - (displayNameW / 2), 365, displayNameHex.c_str(), displayNameW, displayNameH, TFT_WHITE);
+    }
+    else if (displayName.length() > 0)
+    {
+      drawArabicDynamicText(displayName, 160, 365, TFT_WHITE);
     }
 
-    String daysLine = "متبقي: " + String(displayDaysLeft) + " يوم";
-    drawArabicDynamicText(daysLine, 160, 400, TFT_CYAN);
+    if (displayDaysHex.length() > 0 && displayDaysW > 0 && displayDaysH > 0)
+    {
+      drawHexBitmap1Bit(160 - (displayDaysW / 2), 405, displayDaysHex.c_str(), displayDaysW, displayDaysH, TFT_CYAN);
+    }
+    else
+    {
+      String daysLine = "متبقي: " + String(displayDaysLeft) + " يوم";
+      drawArabicDynamicText(daysLine, 160, 405, TFT_CYAN);
+    }
   }
   else
   {
     drawBitmap1BitFast(160 - (AR_STATUS_EXPIRED_W / 2), 325, AR_STATUS_EXPIRED_DATA, AR_STATUS_EXPIRED_W, AR_STATUS_EXPIRED_H, TFT_RED);
 
-    String name = displayName;
-    if (name.length() > 0)
+    if (displayNameHex.length() > 0 && displayNameW > 0 && displayNameH > 0)
     {
-      drawArabicDynamicText(name, 160, 360, TFT_WHITE);
+      drawHexBitmap1Bit(160 - (displayNameW / 2), 365, displayNameHex.c_str(), displayNameW, displayNameH, TFT_WHITE);
+    }
+    else if (displayName.length() > 0)
+    {
+      drawArabicDynamicText(displayName, 160, 365, TFT_WHITE);
     }
 
-    String expLine;
-    if (displayDaysLeft < 0)
+    if (displayDaysHex.length() > 0 && displayDaysW > 0 && displayDaysH > 0)
     {
-      expLine = "منتهي منذ: " + String(-displayDaysLeft) + " يوم";
-    }
-    else if (displayDaysLeft == 0)
-    {
-      expLine = "انتهى الاشتراك اليوم";
+      drawHexBitmap1Bit(160 - (displayDaysW / 2), 405, displayDaysHex.c_str(), displayDaysW, displayDaysH, TFT_YELLOW);
     }
     else
     {
-      expLine = "انتهى: " + displayEndDate;
+      String expLine;
+      if (displayDaysLeft < 0)
+      {
+        expLine = "منتهي منذ: " + String(-displayDaysLeft) + " يوم";
+      }
+      else if (displayDaysLeft == 0)
+      {
+        expLine = "انتهى الاشتراك اليوم";
+      }
+      else
+      {
+        expLine = "انتهى: " + displayEndDate;
+      }
+      drawArabicDynamicText(expLine, 160, 405, TFT_YELLOW);
     }
-    drawArabicDynamicText(expLine, 160, 400, TFT_YELLOW);
   }
 }
 
@@ -1520,6 +1570,12 @@ void updateMemberDisplay()
     memberDisplayActive = false;
 
     displayName = "";
+    displayNameHex = "";
+    displayNameW = 0;
+    displayNameH = 0;
+    displayDaysHex = "";
+    displayDaysW = 0;
+    displayDaysH = 0;
     displayMemberID = "";
     displayPlanType = "";
     displayEndDate = "";
@@ -2761,6 +2817,12 @@ void startAsyncEnrollment(int id, const String &memberID)
 
   memberDisplayActive = false;
   displayName = "";
+  displayNameHex = "";
+  displayNameW = 0;
+  displayNameH = 0;
+  displayDaysHex = "";
+  displayDaysW = 0;
+  displayDaysH = 0;
   displayMemberID = "";
   displayPlanType = "";
   displayEndDate = "";
