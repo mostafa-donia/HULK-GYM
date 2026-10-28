@@ -297,6 +297,16 @@ class ESPClientContractTests(unittest.TestCase):
         self.assertEqual(too_large_result, {"success": False, "error": "database_too_large"})
         urlopen.assert_not_called()
 
+
+    @patch("esp_client.urllib.request.urlopen")
+    def test_clear_all_fingerprints_posts_to_correct_endpoint(self, urlopen):
+        urlopen.return_value = FakeResponse(json.dumps({"success": True}))
+        result = esp_client.clear_all_fingerprints(self.SETTINGS)
+        self.assertEqual(result, {"success": True})
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://192.168.1.254:80/clear_fingerprints")
+        self.assertEqual(request.method, "POST")
+
     def test_calculate_days_left_matches_membership_end_date(self):
         today = app.date.today()
         self.assertEqual(app.calculate_days_left(today.strftime("%d/%m/%Y")), 0)

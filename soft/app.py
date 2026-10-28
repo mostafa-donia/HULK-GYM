@@ -3048,6 +3048,69 @@ class BasePage(QWidget):
             head.addLayout(title_box, 1)
             self.root.addLayout(head)
 
+
+    def clear_all_fingerprints(self) -> None:
+        if not esp_client.is_enabled(self.store.settings):
+            QMessageBox.warning(self, "تنبيه", "ESP غير مفعل. من فضلك فعّل الاتصال بـ ESP من الإعدادات أولاً.")
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "تأكيد مسح جميع البصمات",
+            "هل أنت متأكد من مسح جميع البصمات المسجلة في حساس البصمة (R307)؟\n\n"
+            "⚠️ تحذير: هذا الإجراء سيقوم بتفريغ ذاكرة الحساس بالكامل وحذف كل القوالب المسجلة ولا يمكن التراجع عنه.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        progress = QProgressDialog("جاري مسح جميع البصمات من ذاكرة الحساس...", None, 0, 0, self)
+        progress.setWindowTitle("مسح البصمات")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        def on_done(result: Dict[str, Any]) -> None:
+            progress.close()
+            if result.get("success"):
+                reset_members = QMessageBox.question(
+                    self,
+                    "تم المسح بنجاح",
+                    "تم مسح جميع البصمات من حساس البصمة بنجاح!\n\n"
+                    "هل ترغب أيضاً في تصفير أرقام البصمات المرتبطة بالأعضاء في قاعدة بيانات البرنامج حتى تبدأ من جديد؟",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reset_members == QMessageBox.Yes:
+                    cleared_count = 0
+                    for m in self.store.members:
+                        if m.get("fingerprint_id"):
+                            m["fingerprint_id"] = ""
+                            cleared_count += 1
+                    self.store.save_members(push_to_esp=False)
+                    self.store.member_permissions = {}
+                    self.store.save_member_permission()
+                    self.refresh()
+                    QMessageBox.information(
+                        self,
+                        "تم التصفير",
+                        f"تم تصفير أرقام البصمات لـ {cleared_count} عضواً في قاعدة البيانات.\nيمكنك الآن إعادة تسجيل البصمات من البداية.",
+                    )
+                else:
+                    QMessageBox.information(
+                        self,
+                        "تم المسح",
+                        "تم مسح ذاكرة الحساس مع الإبقاء على سجلات الأعضاء كما هي.",
+                    )
+            else:
+                err = result.get("error_detail", result.get("error", "فشل الاتصال بـ ESP32"))
+                QMessageBox.critical(self, "خطأ", f"فشل مسح البصمات من الحساس:\n{err}")
+
+        self.clear_fp_thread = ESPOperationThread("clear_all_fingerprints", self.store.settings)
+        self.clear_fp_thread.done.connect(on_done)
+        self.clear_fp_thread.finished.connect(self.clear_fp_thread.deleteLater)
+        self.clear_fp_thread.start()
+
     def refresh(self) -> None:
         pass
 
@@ -5383,6 +5446,14 @@ class SettingsPage(BasePage):
         esp_layout.addWidget(self.esp_enabled_toggle, 2, 0)
 
         esp_layout.addWidget(make_label("جهاز ESP متصل على نفس الشبكة (WiFi)، ويتحكم بنظام البصمة والدخول.", "smallMuted"), 3, 0, 1, 2)
+
+        self.clear_all_fp_settings_btn = QPushButton("مسح جميع بصمات الحساس (R307)")
+        self.clear_all_fp_settings_btn.setObjectName("dangerButton")
+        self.clear_all_fp_settings_btn.setStyleSheet("background-color: #c0392b; color: white; font-weight: bold; padding: 8px 16px; border-radius: 6px;")
+        self.clear_all_fp_settings_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_all_fp_settings_btn.clicked.connect(self.clear_all_fingerprints_action)
+        esp_layout.addWidget(self.clear_all_fp_settings_btn, 4, 0, 1, 2)
+
         self.scroll_layout.addWidget(esp_box)
 
         self.scroll_layout.addWidget(make_label("بنك رسائل الواتساب (50 رسالة لكل مجموعة)", "sectionTitle"))
@@ -5832,6 +5903,68 @@ class SettingsPage(BasePage):
         finally:
             self.test_calibration_btn.setEnabled(True)
 
+
+
+    def clear_all_fingerprints_action(self) -> None:
+        if not esp_client.is_enabled(self.store.settings):
+            QMessageBox.warning(self, "تنبيه", "ESP غير مفعل. من فضلك فعّل الاتصال بـ ESP من الإعدادات أولاً.")
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "تأكيد مسح جميع البصمات",
+            "هل أنت متأكد من مسح جميع البصمات المسجلة في حساس البصمة (R307)؟\n\n"
+            "⚠️ تحذير: هذا الإجراء سيقوم بتفريغ ذاكرة الحساس بالكامل وحذف كل القوالب المسجلة ولا يمكن التراجع عنه.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        progress = QProgressDialog("جاري مسح جميع البصمات من ذاكرة الحساس...", None, 0, 0, self)
+        progress.setWindowTitle("مسح البصمات")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        def on_done(result: Dict[str, Any]) -> None:
+            progress.close()
+            if result.get("success"):
+                reset_members = QMessageBox.question(
+                    self,
+                    "تم المسح بنجاح",
+                    "تم مسح جميع البصمات من حساس البصمة بنجاح!\n\n"
+                    "هل ترغب أيضاً في تصفير أرقام البصمات المرتبطة بالأعضاء في قاعدة بيانات البرنامج حتى تبدأ من جديد؟",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reset_members == QMessageBox.Yes:
+                    cleared_count = 0
+                    for m in self.store.members:
+                        if m.get("fingerprint_id"):
+                            m["fingerprint_id"] = ""
+                            cleared_count += 1
+                    self.store.save_members(push_to_esp=False)
+                    self.store.member_permissions = {}
+                    self.store.save_member_permission()
+                    QMessageBox.information(
+                        self,
+                        "تم التصفير",
+                        f"تم تصفير أرقام البصمات لـ {cleared_count} عضواً في قاعدة البيانات.\nيمكنك الآن إعادة تسجيل البصمات من البداية.",
+                    )
+                else:
+                    QMessageBox.information(
+                        self,
+                        "تم المسح",
+                        "تم مسح ذاكرة الحساس مع الإبقاء على سجلات الأعضاء كما هي.",
+                    )
+            else:
+                err = result.get("error_detail", result.get("error", "فشل الاتصال بـ ESP32"))
+                QMessageBox.critical(self, "خطأ", f"فشل مسح البصمات من الحساس:\n{err}")
+
+        self.clear_fp_thread = ESPOperationThread("clear_all_fingerprints", self.store.settings)
+        self.clear_fp_thread.done.connect(on_done)
+        self.clear_fp_thread.finished.connect(self.clear_fp_thread.deleteLater)
+        self.clear_fp_thread.start()
 
     def sync_all_google_contacts(self) -> None:
         if not self.password_unlocked:
@@ -7101,6 +7234,8 @@ class ESPOperationThread(QThread):
                     ESP_SYNC_LOCK.release()
         elif self.operation == "delete":
             result = esp_client.delete_fingerprint(self.settings, self.kwargs["fingerprint_id"])
+        elif self.operation == "clear_all_fingerprints":
+            result = esp_client.clear_all_fingerprints(self.settings)
         else:
             result = {"success": False, "error": "unknown_operation"}
         self.done.emit(result)
@@ -7113,7 +7248,7 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
         return
 
     store.esp_enrollment_active = True
-    progress = QProgressDialog("تسجيل بصمة العضو:\nالخطوة [1/4]: ضع إصبعك بثبات على القارئ", "إلغاء", 0, 0, parent)
+    progress = QProgressDialog("تسجيل بصمة العضو:\nالخطوة [1/2]: ضع إصبعك بثبات على القارئ", "إلغاء", 0, 0, parent)
     progress.setWindowTitle("تسجيل بصمة عضو")
     progress.setMinimumWidth(420)
     progress.setWindowModality(Qt.WindowModal)
@@ -7127,17 +7262,18 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
     status_timer_active = {"value": True}
 
     ENROLL_STEPS_AR = {
-        "waiting_sample_1": "الخطوة [1/4]: ضع إصبعك بثبات على القارئ",
+        "waiting_sample_1": "الخطوة [1/2]: ضع إصبعك بثبات على القارئ",
         "waiting_remove_1": "ممتاز! ارفع إصبعك الآن عن القارئ...",
-        "waiting_sample_2": "الخطوة [2/4]: ضع نفس الإصبع مرة ثانية",
+        "waiting_sample_2": "الخطوة [2/2]: ضع نفس الإصبع مرة ثانية",
+        "waiting_retry_lift": "غير متطابق: ارفع إصبعك وجرب مرة ثانية...",
         "waiting_remove_2": "ممتاز! ارفع إصبعك الآن عن القارئ...",
         "waiting_sample_3": "الخطوة [3/4]: ضع الإصبع بزاوية مختلفة قليلاً",
         "waiting_remove_3": "ممتاز! ارفع إصبعك الآن عن القارئ...",
         "waiting_sample_4": "الخطوة [4/4]: ضع نفس الإصبع للتأكيد الأخير",
-        "waiting_first_finger": "الخطوة [1/4]: ضع إصبعك بثبات على القارئ",
+        "waiting_first_finger": "الخطوة [1/2]: ضع إصبعك بثبات على القارئ",
         "waiting_finger_removal": "ممتاز! ارفع إصبعك الآن عن القارئ...",
-        "waiting_second_finger": "الخطوة [2/4]: ضع نفس الإصبع مرة ثانية",
-        "waiting_retry_removal": "أعد رفع الإصبع ثم وضعه بزاوية مستقيمة...",
+        "waiting_second_finger": "الخطوة [2/2]: ضع نفس الإصبع مرة ثانية",
+        "waiting_retry_removal": "أعد رفع الإصبع ثم وضعه بثبات...",
         "creating_template": "جاري دمج الصور وتوليد قالب البصمة...",
         "saving": "جاري حفظ البصمة في الذاكرة...",
         "completed": "تم تسجيل البصمة بنجاح!",
@@ -7151,7 +7287,7 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
         "second_scan_timeout": "انتهت المهلة قبل وضع الإصبع للتأكيد",
         "first_scan_failed": "فشل التقاط صورة البصمة الأولى - يرجى الضغط بثبات",
         "second_scan_failed": "فشل التقاط صورة البصمة - يرجى الضغط بثبات",
-        "template_mismatch": "تعذر مطابقة البصمة بعد 4 محاولات - يرجى إعادة المحاولة مع تنظيف الحساس",
+        "template_mismatch": "تعذر مطابقة البصمة بعد عدة محاولات - يرجى إعادة المحاولة مع تنظيف الحساس",
         "save_failed": "فشل حفظ البصمة في ذاكرة الحساس",
         "cancelled": "تم إلغاء التسجيل",
     }
@@ -8648,6 +8784,14 @@ class FingerprintDevicePage(BasePage):
         test_permissions.addWidget(self.deny_test_btn, 1)
         test_permissions.addWidget(self.allow_test_btn, 1)
         layout.addLayout(test_permissions)
+
+        layout.addSpacing(20)
+        self.clear_all_fingerprints_btn = QPushButton("مسح جميع البصمات من الحساس")
+        self.clear_all_fingerprints_btn.setObjectName("dangerButton")
+        self.clear_all_fingerprints_btn.setStyleSheet("background-color: #c0392b; color: white; font-weight: bold; padding: 10px 20px; border-radius: 6px;")
+        self.clear_all_fingerprints_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_all_fingerprints_btn.clicked.connect(self.clear_all_fingerprints)
+        layout.addWidget(self.clear_all_fingerprints_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
         layout.addStretch()
 

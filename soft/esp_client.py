@@ -292,5 +292,25 @@ def delete_fingerprint(settings: Dict[str, Any], fingerprint_id: Any, timeout: f
             "error_detail": exc.detail,
         }
 
-
+def clear_all_fingerprints(settings: Dict[str, Any], timeout: float = 10.0) -> Dict[str, Any]:
+    """Wipe all fingerprint templates from the ESP R307 sensor database."""
+    try:
+        _log("Wiping all fingerprints from sensor...")
+        result = _request(
+            settings,
+            "POST",
+            "/clear_fingerprints",
+            timeout=timeout,
+            retries=1,
+        )
+        result.setdefault("success", False)
+        _log("All fingerprints wiped successfully" if result.get("success") else "Fingerprints wipe failed")
+        return result
+    except ESPRequestError as exc:
+        _log(f"Fingerprints wipe failed: {exc.kind}")
+        return {
+            "success": False,
+            "error_kind": exc.kind,
+            "error_detail": exc.detail,
+        }
 
