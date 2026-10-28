@@ -2361,6 +2361,10 @@ class Store:
         renewals = [p for p in period_payments if str(p.get("operation_type", "")) == "renewal"]
         remaining_pays = [p for p in period_payments if str(p.get("operation_type", "")) == "remaining_payment"]
 
+        new_members_amount = sum(float(p.get("paid_amount", 0) or 0) for p in new_subs)
+        renewals_amount = sum(float(p.get("paid_amount", 0) or 0) for p in renewals)
+        remaining_payments_amount = sum(float(p.get("paid_amount", 0) or 0) for p in remaining_pays)
+
         # Receivables (outstanding money)
         total_receivables = sum(float(m.get("current_remaining", 0) or 0) for m in self.members)
         members_with_remaining = [m for m in self.members if float(m.get("current_remaining", 0) or 0) > 0]
@@ -2395,17 +2399,78 @@ class Store:
         ]
 
         # Expenses in period
+        period_expenses_list: List[Dict[str, Any]] = []
         period_expenses = 0.0
         for exp in self.expenses:
             exp_date_str = str(exp.get("date", "")).strip()
             try:
                 ed = parse_date(exp_date_str)
                 if start_date <= ed <= end_date:
+                    period_expenses_list.append(exp)
                     period_expenses += float(exp.get("amount", 0) or 0)
             except Exception:
                 pass
 
         net_income = total_collected - period_expenses
+        avg_transaction = (total_collected / operations_count) if operations_count > 0 else 0.0
+
+        # Payment methods breakdown
+        payment_methods: Dict[str, Dict[str, Any]] = {}
+        for p in period_payments:
+            meth = str(p.get("payment_method", "نقدي") or "نقدي").strip()
+            if not meth:
+                meth = "نقدي"
+            if meth not in payment_methods:
+                payment_methods[meth] = {"count": 0, "amount": 0.0}
+            payment_methods[meth]["count"] += 1
+            payment_methods[meth]["amount"] += float(p.get("paid_amount", 0) or 0)
+
+        # Plan types breakdown
+        plan_types: Dict[str, Dict[str, Any]] = {}
+        for p in period_payments:
+            ptype = str(p.get("subscription_type", "-") or "-").strip()
+            if ptype and ptype != "-":
+                if ptype not in plan_types:
+                    plan_types[ptype] = {"count": 0, "amount": 0.0}
+                plan_types[ptype]["count"] += 1
+                plan_types[ptype]["amount"] += float(p.get("paid_amount", 0) or 0)
+
+        # Daily breakdown for periods longer than 1 day
+        daily_breakdown: List[Dict[str, Any]] = []
+        delta_days = (end_date - start_date).days
+        ARABIC_DAYS = {
+            0: "الإثنين",
+            1: "الثلاثاء",
+            2: "الأربعاء",
+            3: "الخميس",
+            4: "الجمعة",
+            5: "السبت",
+            6: "الأحد",
+        }
+        if delta_days > 0:
+            for day_offset in range(delta_days + 1):
+                cur_day = start_date + timedelta(days=day_offset)
+                cur_str = date_to_str(cur_day)
+                day_pays = [
+                    p for p in period_payments
+                    if (str(p.get("created_at", ""))[:10] == cur_str)
+                    or (not str(p.get("created_at", "")).strip() and str(p.get("subscription_start", "")).strip() == cur_str)
+                ]
+                day_exps = [
+                    exp for exp in period_expenses_list
+                    if str(exp.get("date", "")).strip() == cur_str
+                ]
+                d_income = sum(float(p.get("paid_amount", 0) or 0) for p in day_pays)
+                d_expense = sum(float(exp.get("amount", 0) or 0) for exp in day_exps)
+                daily_breakdown.append({
+                    "date": cur_day,
+                    "date_str": cur_str,
+                    "day_name": ARABIC_DAYS.get(cur_day.weekday(), ""),
+                    "income": d_income,
+                    "expense": d_expense,
+                    "net": d_income - d_expense,
+                    "operations_count": len(day_pays),
+                })
 
         return {
             "start_date": start_date,
@@ -2414,9 +2479,13 @@ class Store:
             "operations_count": operations_count,
             "total_collected": total_collected,
             "new_members_count": len(new_subs),
+            "new_members_amount": new_members_amount,
             "renewals_count": len(renewals),
+            "renewals_amount": renewals_amount,
             "remaining_payments_count": len(remaining_pays),
+            "remaining_payments_amount": remaining_payments_amount,
             "period_expenses": period_expenses,
+            "period_expenses_list": period_expenses_list,
             "net_income": net_income,
             "total_receivables": total_receivables,
             "members_with_remaining_count": len(members_with_remaining),
@@ -2427,6 +2496,10 @@ class Store:
             "ended_in_period_count": len(ended_in_period),
             "ended_and_not_renewed_count": len(ended_and_not_renewed),
             "expiring_soon_count": len(expiring_soon),
+            "payment_methods": payment_methods,
+            "plan_types": plan_types,
+            "daily_breakdown": daily_breakdown,
+            "avg_transaction": avg_transaction,
         }
 
     def build_daily_report_message(self) -> str:
@@ -2454,28 +2527,59 @@ class Store:
             f"• إجمالي المتبقيات المستحقة: {money(today_stats['total_receivables'])} (على {today_stats['members_with_remaining_count']} عضو)",
             "═══════════════════════",
             "📅 *اليوم (Today):*",
-            f"• المحصل اليوم: {money(today_stats['total_collected'])}",
-            f"• المصروفات اليوم: {money(today_stats['period_expenses'])}",
-            f"• صافي الدخل اليوم: {money(today_stats['net_income'])}",
-            f"• العمليات: {today_stats['operations_count']} (جديد: {today_stats['new_members_count']} | تجديد: {today_stats['renewals_count']} | دفع متبقي: {today_stats['remaining_payments_count']})",
-            f"• انتهت اشتراكاتهم ولم يجددوا اليوم: {today_stats['ended_and_not_renewed_count']}",
-            "═══════════════════════",
-            "🗓️ *الأسبوع الحالي (This Week):*",
-            f"• المحصل هذا الأسبوع: {money(week_stats['total_collected'])}",
-            f"• مشتركين جدد: {week_stats['new_members_count']}",
-            f"• تجديدات: {week_stats['renewals_count']}",
-            f"• انتهت ولم تجدد هذا الأسبوع: {week_stats['ended_and_not_renewed_count']}",
-            "═══════════════════════",
-            "📆 *الشهر الحالي (This Month):*",
-            f"• المحصل هذا الشهر: {money(month_stats['total_collected'])}",
-            f"• مشتركين جدد هذا الشهر: {month_stats['new_members_count']}",
-            f"• إجمالي التجديدات: {month_stats['renewals_count']}",
-            f"• انتهت اشتراكاتهم ولم يجددوا: {month_stats['ended_and_not_renewed_count']}",
-            f"• اشتراكات تنتهي هذا الشهر: {month_stats['expiring_soon_count']}",
-            "═══════════════════════",
-            "📝 *تفاصيل عمليات اليوم:*",
+            f"• 💵 إجمالي الإيراد المحصل: {money(today_stats['total_collected'])}",
+            f"• 💸 إجمالي المصروفات: {money(today_stats['period_expenses'])}",
+            f"• 📈 صافي الدخل اليومي: {money(today_stats['net_income'])}",
+            f"• 🧾 إجمالي الفواتير: {today_stats['operations_count']}",
+            f"  - مشتركين جدد: {today_stats['new_members_count']} ({money(today_stats['new_members_amount'])})",
+            f"  - تجديدات: {today_stats['renewals_count']} ({money(today_stats['renewals_amount'])})",
+            f"  - دفع متبقيات: {today_stats['remaining_payments_count']} ({money(today_stats['remaining_payments_amount'])})",
+            f"• ⚠️ متبقيات جديدة مسجلة اليوم: {money(today_stats['period_receivables_generated'])}",
+            f"• 🚫 انتهت اشتراكاتهم اليوم ولم يجددوا: {today_stats['ended_and_not_renewed_count']}",
         ]
 
+        if today_stats["payment_methods"]:
+            meth_lines = [f"{m}: {money(d['amount'])}" for m, d in today_stats["payment_methods"].items()]
+            lines.append("• 💳 طرق الدفع اليوم: " + " | ".join(meth_lines))
+
+        lines.extend([
+            "═══════════════════════",
+            "🗓️ *الأسبوع الحالي (This Week):*",
+            f"• 💵 إجمالي الإيراد المحصل: {money(week_stats['total_collected'])}",
+            f"• 💸 إجمالي المصروفات: {money(week_stats['period_expenses'])}",
+            f"• 📈 صافي الدخل الأسبوعي: {money(week_stats['net_income'])}",
+            f"• 🧾 إجمالي الفواتير: {week_stats['operations_count']}",
+            f"  - مشتركين جدد: {week_stats['new_members_count']} ({money(week_stats['new_members_amount'])})",
+            f"  - تجديدات: {week_stats['renewals_count']} ({money(week_stats['renewals_amount'])})",
+            f"  - دفع متبقيات: {week_stats['remaining_payments_count']} ({money(week_stats['remaining_payments_amount'])})",
+            f"• 🚫 انتهت ولم تجدد هذا الأسبوع: {week_stats['ended_and_not_renewed_count']}",
+            f"• ⚠️ اشتراكات تنتهي قريباً: {week_stats['expiring_soon_count']}",
+            "═══════════════════════",
+            "📆 *الشهر الحالي (This Month):*",
+            f"• 💵 إجمالي الإيراد المحصل: {money(month_stats['total_collected'])}",
+            f"• 💸 إجمالي المصروفات: {money(month_stats['period_expenses'])}",
+            f"• 📈 صافي الدخل الشهري: {money(month_stats['net_income'])}",
+            f"• 🧾 إجمالي الفواتير: {month_stats['operations_count']}",
+            f"  - مشتركين جدد هذا الشهر: {month_stats['new_members_count']} ({money(month_stats['new_members_amount'])})",
+            f"  - إجمالي التجديدات: {month_stats['renewals_count']} ({money(month_stats['renewals_amount'])})",
+            f"  - دفع متبقيات: {month_stats['remaining_payments_count']} ({money(month_stats['remaining_payments_amount'])})",
+            f"• 🚫 انتهت اشتراكاتهم ولم يجددوا: {month_stats['ended_and_not_renewed_count']}",
+            f"• ⚠️ اشتراكات تنتهي هذا الشهر: {month_stats['expiring_soon_count']}",
+        ])
+
+        # Expenses details today
+        lines.append("═══════════════════════")
+        lines.append("💸 *تفاصيل مصروفات اليوم:*")
+        if today_stats["period_expenses_list"]:
+            for exp in today_stats["period_expenses_list"]:
+                notes_part = f" ({exp.get('notes')})" if exp.get('notes') else ""
+                lines.append(f"- {exp.get('name', 'مصروف')}: {money(exp.get('amount', 0))}{notes_part}")
+        else:
+            lines.append("- لا توجد مصروفات مسجلة اليوم")
+
+        # Payments details today
+        lines.append("═══════════════════════")
+        lines.append("📝 *تفاصيل عمليات وفواتير اليوم:*")
         if today_stats["payments"]:
             for p in today_stats["payments"]:
                 lines.append(
@@ -3500,29 +3604,100 @@ class ManagerPage(BasePage):
     def _render_payments_html(self, pays: List[Dict[str, Any]], title: str) -> str:
         stats = self.store.calculate_period_stats(self._period_start, self._period_end)
 
-        html = f"<h2 style='margin-bottom:14px; text-align:right;'>{title}</h2>"
-        html += "<div style='display:grid; gap:16px; grid-template-columns:repeat(3, minmax(200px, 1fr)); margin-bottom:20px; direction:rtl;'>"
-        html += self._report_metric_card("عدد العمليات", str(stats["operations_count"]), "#FFFFFF")
-        html += self._report_metric_card("إجمالي الإيراد المحصل", money(stats["total_collected"]), "#B7F56D")
-        html += self._report_metric_card("إجمالي المصروفات", money(stats["period_expenses"]), "#FFB8B8")
-        html += self._report_metric_card("صافي الدخل", money(stats["net_income"]), "#7ED321")
-        html += self._report_metric_card("إجمالي المتبقيات المستحقة", money(stats["total_receivables"]), "#F3F8FB")
-        html += self._report_metric_card("أعضاء عليهم متبقي", str(stats["members_with_remaining_count"]), "#FFB8B8")
-        html += self._report_metric_card("المشتركين النشطين (Active)", str(stats["active_members_count"]), "#7ED321")
-        html += self._report_metric_card("الاشتراكات المنتهية (Expired)", str(stats["expired_members_count"]), "#A8B3BC")
-        html += self._report_metric_card("مشتركين جدد في الفترة", str(stats["new_members_count"]), "#7ED321")
-        html += self._report_metric_card("تجديدات في الفترة", str(stats["renewals_count"]), "#33CCFF")
-        html += self._report_metric_card("دفع متبقي في الفترة", str(stats["remaining_payments_count"]), "#F3F8FB")
+        html = (
+            "<div style='background:linear-gradient(135deg, #13222f 0%, #0d1720 100%); "
+            "border:1px solid #23303B; border-radius:14px; padding:16px 20px; margin-bottom:20px; direction:rtl;'>"
+            "<div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;'>"
+            f"<h2 style='margin:0; font-size:20px; color:#FFFFFF;'>{title}</h2>"
+            "<div style='display:flex; gap:10px; flex-wrap:wrap;'>"
+            f"<span style='background:#1b3d22; color:#7ED321; padding:6px 14px; border-radius:20px; font-size:13px; font-weight:bold;'>الإيراد: {money(stats['total_collected'])}</span>"
+            f"<span style='background:#3d1b1b; color:#FF8080; padding:6px 14px; border-radius:20px; font-size:13px; font-weight:bold;'>المصروفات: {money(stats['period_expenses'])}</span>"
+            f"<span style='background:#15344d; color:#00E5FF; padding:6px 14px; border-radius:20px; font-size:13px; font-weight:bold;'>صافي الربح: {money(stats['net_income'])}</span>"
+            f"<span style='background:#23303B; color:#FFFFFF; padding:6px 14px; border-radius:20px; font-size:13px; font-weight:bold;'>العمليات: {stats['operations_count']}</span>"
+            "</div></div></div>"
+        )
+
+        # KPI Metric Cards Grid
+        html += "<div style='display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); margin-bottom:24px; direction:rtl;'>"
+        html += self._report_metric_card("إجمالي الإيراد المحصل", money(stats["total_collected"]), "#7ED321")
+        html += self._report_metric_card("إجمالي المصروفات", money(stats["period_expenses"]), "#FF8080")
+        html += self._report_metric_card("صافي الدخل / الربح", money(stats["net_income"]), "#00E5FF")
+        html += self._report_metric_card("عدد العمليات والفواتير", str(stats["operations_count"]), "#FFFFFF", f"متوسط: {money(stats['avg_transaction'])}")
+        html += self._report_metric_card("مشتركين جدد في الفترة", str(stats["new_members_count"]), "#7ED321", money(stats["new_members_amount"]))
+        html += self._report_metric_card("تجديدات في الفترة", str(stats["renewals_count"]), "#33CCFF", money(stats["renewals_amount"]))
+        html += self._report_metric_card("دفع متبقيات سابقة", str(stats["remaining_payments_count"]), "#B7F56D", money(stats["remaining_payments_amount"]))
+        html += self._report_metric_card("متبقيات جديدة مسجلة", money(stats["period_receivables_generated"]), "#FFAA00", "خلال هذه الفترة")
+        html += self._report_metric_card("إجمالي ديون الأعضاء", money(stats["total_receivables"]), "#FFAA00", f"على {stats['members_with_remaining_count']} عضو")
+        html += self._report_metric_card("المشتركين النشطين (Active)", str(stats["active_members_count"]), "#7ED321", f"من {stats['total_members_count']} عضو")
+        html += self._report_metric_card("العضوية المنتهية (Expired)", str(stats["expired_members_count"]), "#A8B3BC")
         html += self._report_metric_card("انتهت اشتراكاتهم ولم يجددوا", str(stats["ended_and_not_renewed_count"]), "#FF6B6B")
         html += self._report_metric_card("اشتراكات تنتهي في الفترة", str(stats["expiring_soon_count"]), "#FFB8B8")
         html += "</div>"
 
+        # Analytical Breakdowns (Payment Methods & Plan Types)
+        has_pm = bool(stats.get("payment_methods"))
+        has_pt = bool(stats.get("plan_types"))
+        if has_pm or has_pt:
+            html += "<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-bottom:24px; direction:rtl;'>"
+            if has_pm:
+                html += "<div style='background:#0F1B24; border:1px solid #23303B; border-radius:12px; padding:14px;'>"
+                html += "<h4 style='margin:0 0 10px 0; color:#33CCFF; text-align:right;'>💳 طرق الدفع المستخدمة:</h4>"
+                html += "<table style='width:100%; border-collapse:collapse; font-size:12px; text-align:right;'>"
+                html += "<tr style='color:#758A99; border-bottom:1px solid #1c2a38;'><th style='padding:6px;'>طريقة الدفع</th><th style='padding:6px;'>العمليات</th><th style='padding:6px;'>المبلغ المحصل</th></tr>"
+                for m_name, m_data in stats["payment_methods"].items():
+                    html += f"<tr style='border-bottom:1px solid #16222d;'><td style='padding:6px; color:#FFFFFF;'>{m_name}</td><td style='padding:6px; color:#A8B3BC;'>{m_data['count']}</td><td style='padding:6px; color:#B7F56D;'>{money(m_data['amount'])}</td></tr>"
+                html += "</table></div>"
+            if has_pt:
+                html += "<div style='background:#0F1B24; border:1px solid #23303B; border-radius:12px; padding:14px;'>"
+                html += "<h4 style='margin:0 0 10px 0; color:#B7F56D; text-align:right;'>📋 توزيع الخطط والاشتراكات:</h4>"
+                html += "<table style='width:100%; border-collapse:collapse; font-size:12px; text-align:right;'>"
+                html += "<tr style='color:#758A99; border-bottom:1px solid #1c2a38;'><th style='padding:6px;'>الخطة</th><th style='padding:6px;'>المشتركين</th><th style='padding:6px;'>إجمالي القيمة</th></tr>"
+                for p_name, p_data in stats["plan_types"].items():
+                    html += f"<tr style='border-bottom:1px solid #16222d;'><td style='padding:6px; color:#FFFFFF;'>{p_name}</td><td style='padding:6px; color:#A8B3BC;'>{p_data['count']}</td><td style='padding:6px; color:#B7F56D;'>{money(p_data['amount'])}</td></tr>"
+                html += "</table></div>"
+            html += "</div>"
+
+        # Daily breakdown table if period has multiple days
+        if len(stats.get("daily_breakdown", [])) > 1:
+            html += "<h3 style='margin:20px 0 10px 0; text-align:right; color:#FFFFFF;'>📅 الأداء والتدفق المالي اليومي:</h3>"
+            html += "<table style='width:100%; border-collapse:collapse; direction:rtl; font-size:13px; text-align:right; margin-bottom:24px;'>"
+            html += "<tr style='background:#182633; color:#A8B3BC; border-bottom:1px solid #23303B;'>"
+            html += "<th style='padding:8px;'>التاريخ</th><th style='padding:8px;'>اليوم</th><th style='padding:8px;'>الإيراد المحصل</th><th style='padding:8px;'>المصروفات</th><th style='padding:8px;'>صافي الدخل</th><th style='padding:8px;'>العمليات</th>"
+            html += "</tr>"
+            for d in stats["daily_breakdown"]:
+                net_color = "#7ED321" if d["net"] >= 0 else "#FF8080"
+                html += "<tr style='border-bottom:1px solid #1c2a38;'>"
+                html += f"<td style='padding:6px; color:#FFFFFF;'>{d['date_str']}</td><td style='color:#A8B3BC;'>{d['day_name']}</td><td style='color:#B7F56D;'>{money(d['income'])}</td><td style='color:#FF8080;'>{money(d['expense'])}</td><td style='color:{net_color}; font-weight:bold;'>{money(d['net'])}</td><td style='color:#A8B3BC;'>{d['operations_count']}</td>"
+                html += "</tr>"
+            html += "</table>"
+
+        # Expenses table in this period
+        html += "<h3 style='margin:20px 0 10px 0; text-align:right; color:#FFFFFF;'>💸 تفاصيل المصروفات في هذه الفترة:</h3>"
+        if stats.get("period_expenses_list"):
+            html += "<table style='width:100%; border-collapse:collapse; direction:rtl; font-size:13px; text-align:right; margin-bottom:24px;'>"
+            html += "<tr style='background:#182633; color:#A8B3BC; border-bottom:1px solid #23303B;'>"
+            html += "<th style='padding:8px;'>الكود</th><th style='padding:8px;'>بند المصروف</th><th style='padding:8px;'>المبلغ</th><th style='padding:8px;'>التاريخ</th><th style='padding:8px;'>ملاحظات</th>"
+            html += "</tr>"
+            for exp in stats["period_expenses_list"]:
+                eid = str(exp.get("expense_id", "-"))
+                enm = str(exp.get("name", "-"))
+                eamt = money(exp.get("amount", 0))
+                edt = str(exp.get("date", "-"))
+                ents = str(exp.get("notes", "-") or "-")
+                html += "<tr style='border-bottom:1px solid #1c2a38;'>"
+                html += f"<td style='padding:6px; color:#A8B3BC;'>{eid}</td><td style='color:#FFFFFF;'>{enm}</td><td style='color:#FF8080; font-weight:bold;'>{eamt}</td><td style='color:#A8B3BC;'>{edt}</td><td style='color:#A8B3BC;'>{ents}</td>"
+                html += "</tr>"
+            html += f"<tr style='background:#13222f; font-weight:bold;'><td colspan='2' style='padding:8px; text-align:center;'>إجمالي المصروفات</td><td style='color:#FF8080; padding:8px;'>{money(stats['period_expenses'])}</td><td colspan='2'></td></tr>"
+            html += "</table>"
+        else:
+            html += "<div style='color:#758A99; font-size:13px; margin-bottom:20px; text-align:right;'>لا توجد مصروفات مسجلة في هذه الفترة.</div>"
+
         # Detailed table of payments in the period
+        html += "<h3 style='margin:20px 0 10px 0; text-align:right; color:#FFFFFF;'>🧾 تفاصيل العمليات والفواتير في هذه الفترة:</h3>"
         if pays:
-            html += "<h3 style='margin-bottom:10px; text-align:right;'>تفاصيل العمليات في هذه الفترة:</h3>"
             html += "<table style='width:100%; border-collapse:collapse; direction:rtl; font-size:13px; text-align:right;'>"
             html += "<tr style='background:#182633; color:#A8B3BC; border-bottom:1px solid #23303B;'>"
-            html += "<th style='padding:8px;'>الفاتورة</th><th style='padding:8px;'>الاسم</th><th style='padding:8px;'>الموبايل</th><th style='padding:8px;'>نوع العملية</th><th style='padding:8px;'>الخطة</th><th style='padding:8px;'>المدفوع</th><th style='padding:8px;'>المتبقي</th><th style='padding:8px;'>التاريخ</th>"
+            html += "<th style='padding:8px;'>الفاتورة</th><th style='padding:8px;'>الاسم</th><th style='padding:8px;'>الموبايل</th><th style='padding:8px;'>نوع العملية</th><th style='padding:8px;'>الخطة</th><th style='padding:8px;'>طريقة الدفع</th><th style='padding:8px;'>المدفوع</th><th style='padding:8px;'>المتبقي</th><th style='padding:8px;'>التاريخ والوقت</th>"
             html += "</tr>"
             for p in pays:
                 op_title = operation_ar(str(p.get("operation_type", "")))
@@ -3530,21 +3705,27 @@ class ManagerPage(BasePage):
                 nm = str(p.get("name", "-"))
                 mob = str(p.get("mobile", "-"))
                 plan = str(p.get("subscription_type", "-"))
+                pmeth = str(p.get("payment_method", "نقدي") or "نقدي")
                 paid = money(p.get("paid_amount", 0))
                 rem = money(p.get("remaining_amount", 0))
                 dt = str(p.get("created_at", "-"))[:16]
-                html += f"<tr style='border-bottom:1px solid #1c2a38;'>"
-                html += f"<td style='padding:6px;'>{inv}</td><td>{nm}</td><td>{mob}</td><td>{op_title}</td><td>{plan}</td><td style='color:#B7F56D;'>{paid}</td><td style='color:#FFB8B8;'>{rem}</td><td>{dt}</td>"
+                html += "<tr style='border-bottom:1px solid #1c2a38;'>"
+                html += f"<td style='padding:6px; color:#FFFFFF;'>{inv}</td><td>{nm}</td><td>{mob}</td><td>{op_title}</td><td>{plan}</td><td style='color:#33CCFF;'>{pmeth}</td><td style='color:#B7F56D; font-weight:bold;'>{paid}</td><td style='color:#FFB8B8;'>{rem}</td><td>{dt}</td>"
                 html += "</tr>"
+            html += f"<tr style='background:#13222f; font-weight:bold;'><td colspan='6' style='padding:8px; text-align:center;'>إجمالي الإيرادات المحصلة</td><td style='color:#B7F56D; padding:8px;'>{money(stats['total_collected'])}</td><td style='color:#FFB8B8; padding:8px;'>{money(stats['period_receivables_generated'])}</td><td></td></tr>"
             html += "</table>"
+        else:
+            html += "<div style='color:#758A99; font-size:13px; text-align:right;'>لا توجد عمليات أو فواتير مسجلة في هذه الفترة.</div>"
 
         return html
 
-    def _report_metric_card(self, title: str, value: str, color: str) -> str:
+    def _report_metric_card(self, title: str, value: str, color: str, subtitle: str = "") -> str:
+        sub_html = f"<div style='color:#758A99; font-size:11px; margin-top:4px; text-align:center;'>{subtitle}</div>" if subtitle else ""
         return (
-            f"<div style='background:#0F1B24; border:1px solid #23303B; border-radius:14px; padding:14px; direction:rtl;'>"
-            f"<div style='color:#A8B3BC; margin-bottom:8px; text-align:center;'>{title}</div>"
-            f"<div style='color:{color}; font-size:22px; font-weight:800; text-align:center;'>{value}</div>"
+            f"<div style='background:#0F1B24; border:1px solid #23303B; border-radius:14px; padding:12px 10px; direction:rtl; min-width:140px;'>"
+            f"<div style='color:#A8B3BC; font-size:12px; margin-bottom:6px; text-align:center;'>{title}</div>"
+            f"<div style='color:{color}; font-size:20px; font-weight:800; text-align:center;'>{value}</div>"
+            f"{sub_html}"
             "</div>"
         )
 
