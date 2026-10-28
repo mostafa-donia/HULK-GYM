@@ -547,6 +547,21 @@ def now_str() -> str:
     return datetime.now().strftime(DATETIME_FMT)
 
 
+def parse_datetime(raw: str) -> Optional[datetime]:
+    raw = str(raw).strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw[:19], fmt)
+        except Exception:
+            pass
+    try:
+        return datetime.fromisoformat(raw[:19])
+    except Exception:
+        return None
+
+
 def add_months(d: date, months: int) -> date:
     month = d.month - 1 + months
     year = d.year + month // 12
@@ -741,8 +756,43 @@ class Store:
             self._set_google_synced_numbers(synced_set)
             self.save_google_contacts_synced_numbers()
         self._bootstrap_sent_history_from_existing_messages(save=True)
+        self._deduplicate_payments()
         self.rollover_whatsapp_messages_if_needed()
         self.refresh_statuses(save=False)
+
+    def _deduplicate_payments(self) -> bool:
+        seen = {}
+        cleaned = []
+        removed = []
+        for p in self.payments:
+            mid = str(p.get("member_id", "")).strip()
+            op = str(p.get("operation_type", "")).strip()
+            amount = float(p.get("paid_amount", 0) or 0)
+            sub_start = str(p.get("subscription_start", "")).strip()
+            created_at = str(p.get("created_at", "")).strip()[:16]  # minute-precision
+            key = (mid, op, amount, sub_start, created_at)
+            if key in seen:
+                removed.append(p)
+            else:
+                seen[key] = p
+                cleaned.append(p)
+        if removed:
+            self.payments = cleaned
+            self.save_payments()
+            removed_invoices = {str(r.get("invoice_no", "")) for r in removed}
+            members_changed = False
+            for m in self.members:
+                history = m.get("subscriptions_history", [])
+                new_history = [h for h in history if str(h.get("invoice_no", "")) not in removed_invoices]
+                if len(new_history) != len(history):
+                    m["subscriptions_history"] = new_history
+                    m["total_paid"] = sum(float(h.get("paid_amount", 0) or 0) for h in new_history)
+                    members_changed = True
+            if members_changed:
+                self.save_members()
+            debug_log(f"Store._deduplicate_payments: cleaned {len(removed)} duplicate payments on startup")
+            return True
+        return False
 
     def _bootstrap_sent_history_from_existing_messages(self, save: bool = True) -> int:
         changed = 0
@@ -1863,6 +1913,24 @@ class Store:
         member = next((m for m in self.members if m.get("member_id") == member_id), None)
         if member is None:
             raise ValueError("اختار مشترك صحيح.")
+
+        # Guard against rapid duplicate calls within 15 seconds
+        curr_time_str = now_str()
+        for existing_p in reversed(self.payments[-15:]):
+            if (
+                existing_p.get("member_id") == member.get("member_id")
+                and existing_p.get("operation_type") == "remaining_payment"
+                and abs(float(existing_p.get("paid_amount", 0) or 0) - float(paid_amount)) < 0.01
+            ):
+                try:
+                    t1 = parse_datetime(str(existing_p.get("created_at", "")))
+                    t2 = parse_datetime(curr_time_str)
+                    if abs((t2 - t1).total_seconds()) < 15:
+                        debug_log(f"pay_remaining: duplicate payment suppressed: {existing_p.get('invoice_no')}")
+                        return existing_p
+                except Exception:
+                    pass
+
         new_end, remaining_before, remaining_after, days_added = self.calculate_remaining_extension(member, paid_amount, days)
 
         payment = {
@@ -1975,6 +2043,29 @@ class Store:
         days_override = int(payload.get("allowance_days", 0) or 0)
         subscription_end, plan_price, remaining, _days = self.calculate_end(start_date, subscription_type, paid_amount, days_override)
         payment_status = "paid" if remaining <= 0 else "partial"
+
+        # Guard against rapid duplicate calls (double-clicks or repeated submissions within 15 seconds)
+        curr_time_str = now_str()
+        for existing_p in reversed(self.payments[-15:]):
+            same_identity = (
+                (member and existing_p.get("member_id") == member.get("member_id"))
+                or (mobile and normalize_mobile(str(existing_p.get("mobile", ""))) == mobile)
+            )
+            if (
+                same_identity
+                and existing_p.get("operation_type") == operation_type
+                and abs(float(existing_p.get("paid_amount", 0) or 0) - float(paid_amount)) < 0.01
+                and str(existing_p.get("subscription_start", "")) == date_to_str(start_date)
+                and str(existing_p.get("subscription_type", "")) == subscription_type
+            ):
+                try:
+                    t1 = parse_datetime(str(existing_p.get("created_at", "")))
+                    t2 = parse_datetime(curr_time_str)
+                    if t1 and t2 and abs((t2 - t1).total_seconds()) < 15:
+                        debug_log(f"add_payment: duplicate payment suppressed: {existing_p.get('invoice_no')}")
+                        return existing_p
+                except Exception:
+                    pass
 
         if operation_type == "new_subscription":
             member = {
@@ -2183,48 +2274,163 @@ class Store:
                 "نورتنا في أي وقت للتجديد والرجوع للتمرين 💪"
             )
 
+    def calculate_period_stats(self, start_date: date, end_date: date) -> Dict[str, Any]:
+        self.refresh_statuses(save=False)
+        today = date.today()
+
+        # 1. Period payments
+        period_payments: List[Dict[str, Any]] = []
+        for p in self.payments:
+            created_str = str(p.get("created_at", "")).strip()
+            sub_start_str = str(p.get("subscription_start", "")).strip()
+            p_date = None
+            if created_str:
+                try:
+                    p_date = parse_date(created_str[:10])
+                except Exception:
+                    pass
+            if not p_date and sub_start_str:
+                try:
+                    p_date = parse_date(sub_start_str)
+                except Exception:
+                    pass
+            if p_date and start_date <= p_date <= end_date:
+                period_payments.append(p)
+
+        total_collected = sum(float(p.get("paid_amount", 0) or 0) for p in period_payments)
+        operations_count = len(period_payments)
+
+        # Breakdown of operations in period
+        new_subs = [p for p in period_payments if str(p.get("operation_type", "")) == "new_subscription"]
+        renewals = [p for p in period_payments if str(p.get("operation_type", "")) == "renewal"]
+        remaining_pays = [p for p in period_payments if str(p.get("operation_type", "")) == "remaining_payment"]
+
+        # Receivables (outstanding money)
+        total_receivables = sum(float(m.get("current_remaining", 0) or 0) for m in self.members)
+        members_with_remaining = [m for m in self.members if float(m.get("current_remaining", 0) or 0) > 0]
+        period_receivables_generated = sum(float(p.get("remaining_amount", 0) or 0) for p in period_payments)
+
+        # Member counts
+        active_members = [m for m in self.members if str(m.get("current_status", "expired")) == "active"]
+        expired_members = [m for m in self.members if str(m.get("current_status", "expired")) == "expired"]
+        total_members = len(self.members)
+
+        # Ended during period
+        ended_in_period = []
+        for m in self.members:
+            end_str = str(m.get("last_subscription_end", "")).strip()
+            if not end_str:
+                continue
+            try:
+                e_date = parse_date(end_str)
+                if start_date <= e_date <= end_date:
+                    ended_in_period.append(m)
+            except Exception:
+                pass
+
+        # Ended and didn't renew: ended in period AND current_status is still "expired"
+        ended_and_not_renewed = [m for m in ended_in_period if str(m.get("current_status", "expired")) == "expired"]
+
+        # Subscriptions expiring in this period / left this month
+        expiring_soon = [
+            m for m in active_members
+            if m.get("last_subscription_end")
+            and start_date <= parse_date(str(m.get("last_subscription_end", ""))) <= end_date
+        ]
+
+        # Expenses in period
+        period_expenses = 0.0
+        for exp in self.expenses:
+            exp_date_str = str(exp.get("date", "")).strip()
+            try:
+                ed = parse_date(exp_date_str)
+                if start_date <= ed <= end_date:
+                    period_expenses += float(exp.get("amount", 0) or 0)
+            except Exception:
+                pass
+
+        net_income = total_collected - period_expenses
+
+        return {
+            "start_date": start_date,
+            "end_date": end_date,
+            "payments": period_payments,
+            "operations_count": operations_count,
+            "total_collected": total_collected,
+            "new_members_count": len(new_subs),
+            "renewals_count": len(renewals),
+            "remaining_payments_count": len(remaining_pays),
+            "period_expenses": period_expenses,
+            "net_income": net_income,
+            "total_receivables": total_receivables,
+            "members_with_remaining_count": len(members_with_remaining),
+            "period_receivables_generated": period_receivables_generated,
+            "active_members_count": len(active_members),
+            "expired_members_count": len(expired_members),
+            "total_members_count": total_members,
+            "ended_in_period_count": len(ended_in_period),
+            "ended_and_not_renewed_count": len(ended_and_not_renewed),
+            "expiring_soon_count": len(expiring_soon),
+        }
+
     def build_daily_report_message(self) -> str:
         self.refresh_statuses(save=True)
         today = date.today()
-        today_str = date_to_str(today)
-        members = self.members
-        #active = [m for m in members if m.get("current_status") == "active"]
-        #expired = [m for m in members if m.get("current_status") == "expired"]
-        #males = [m for m in members if m.get("gender") == "male"]
-        #females = [m for m in members if m.get("gender") == "female"]
-        payments_today = [p for p in self.payments if str(p.get("created_at", "")).startswith(today_str)]
-        total_today = sum(float(p.get("paid_amount", 0) or 0) for p in payments_today)
-        total_all = sum(float(p.get("paid_amount", 0) or 0) for p in self.payments)
-        total_remaining = sum(float(m.get("current_remaining", 0) or 0) for m in members)
-        #due_3 = [m for m in active if (parse_date(str(m.get("last_subscription_end", ""))) - today).days == 3]
-        #due_1 = [m for m in active if (parse_date(str(m.get("last_subscription_end", ""))) - today).days == 1]
-        #ended = [m for m in expired if parse_date(str(m.get("last_subscription_end", ""))) < today and m.get("last_subscription_end")]
+        # Today stats
+        today_stats = self.calculate_period_stats(today, today)
+        # Week stats (last 7 days including today)
+        week_start = today - timedelta(days=6)
+        week_stats = self.calculate_period_stats(week_start, today)
+        # Month stats (current calendar month)
+        month_start = date(today.year, today.month, 1)
+        month_end = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
+        month_stats = self.calculate_period_stats(month_start, month_end)
 
+        now_time = datetime.now().strftime("%I:%M %p")
         lines = [
-            "تقرير هالك جيم اليومي",
-            f"التاريخ: {today.strftime('%d/%m/%Y')} - الساعة: {datetime.now().strftime('%H:%M')}",
-            "--------------------",
-            f"إجمالي الأعضاء: {len(members)}",
-            "--------------------",
-            f"مدفوعات اليوم: {len(payments_today)} عملية",
-            f"إيراد اليوم: {money(total_today)}",
-            f"إجمالي الإيرادات: {money(total_all)}",
-            f"إجمالي المتبقي: {money(total_remaining)}",
+            "📊 *تقرير هالك جيم الشامل (HULK GYM)*",
+            f"📅 التاريخ: {today.strftime('%d/%m/%Y')} - ⏰ {now_time}",
+            "═══════════════════════",
+            "🏢 *الحالة العامة للجيم:*",
+            f"• إجمالي الأعضاء: {today_stats['total_members_count']}",
+            f"• المشتركين النشطين (Active): {today_stats['active_members_count']} 💪",
+            f"• الاشتراكات المنتهية (Expired): {today_stats['expired_members_count']}",
+            f"• إجمالي المتبقيات المستحقة: {money(today_stats['total_receivables'])} (على {today_stats['members_with_remaining_count']} عضو)",
+            "═══════════════════════",
+            "📅 *اليوم (Today):*",
+            f"• المحصل اليوم: {money(today_stats['total_collected'])}",
+            f"• المصروفات اليوم: {money(today_stats['period_expenses'])}",
+            f"• صافي الدخل اليوم: {money(today_stats['net_income'])}",
+            f"• العمليات: {today_stats['operations_count']} (جديد: {today_stats['new_members_count']} | تجديد: {today_stats['renewals_count']} | دفع متبقي: {today_stats['remaining_payments_count']})",
+            f"• انتهت اشتراكاتهم ولم يجددوا اليوم: {today_stats['ended_and_not_renewed_count']}",
+            "═══════════════════════",
+            "🗓️ *الأسبوع الحالي (This Week):*",
+            f"• المحصل هذا الأسبوع: {money(week_stats['total_collected'])}",
+            f"• مشتركين جدد: {week_stats['new_members_count']}",
+            f"• تجديدات: {week_stats['renewals_count']}",
+            f"• انتهت ولم تجدد هذا الأسبوع: {week_stats['ended_and_not_renewed_count']}",
+            "═══════════════════════",
+            "📆 *الشهر الحالي (This Month):*",
+            f"• المحصل هذا الشهر: {money(month_stats['total_collected'])}",
+            f"• مشتركين جدد هذا الشهر: {month_stats['new_members_count']}",
+            f"• إجمالي التجديدات: {month_stats['renewals_count']}",
+            f"• انتهت اشتراكاتهم ولم يجددوا: {month_stats['ended_and_not_renewed_count']}",
+            f"• اشتراكات تنتهي هذا الشهر: {month_stats['expiring_soon_count']}",
+            "═══════════════════════",
+            "📝 *تفاصيل عمليات اليوم:*",
         ]
 
-        lines.append("--------------------")
-        lines.append("تفاصيل مدفوعات اليوم:")
-        if payments_today:
-            for p in payments_today:
+        if today_stats["payments"]:
+            for p in today_stats["payments"]:
                 lines.append(
-                    f"- {p.get('invoice_no', '-')[4:]} | {p.get('name', '-')} | {p.get('mobile', '-')} | "
+                    f"- {p.get('invoice_no', '-')} | {p.get('name', '-')} | "
                     f"{operation_ar(str(p.get('operation_type', '')))} | {money(p.get('paid_amount', 0))} | "
                     f"متبقي {money(p.get('remaining_amount', 0))} | {p.get('payment_method', '-')}"
                 )
         else:
             lines.append("- لا توجد مدفوعات اليوم")
 
-        lines.append("--------------------")
+        lines.append("═══════════════════════")
         return "\n".join(lines)
 
     def queue_whatsapp_message(
@@ -3138,18 +3344,13 @@ class ManagerPage(BasePage):
 
         outstanding = sum(float(m.get("current_remaining", 0) or 0) for m in members)
 
-        # New members this month: try to parse timestamp from member_id 'member_{ms}'
-        new_members_month = 0
-        for m in members:
-            mid = str(m.get("member_id", ""))
-            if mid.startswith("member_"):
-                try:
-                    ts = int(mid.split("member_")[-1]) / 1000.0
-                    created = datetime.fromtimestamp(ts).date()
-                    if created >= date(today.year, today.month, 1):
-                        new_members_month += 1
-                except Exception:
-                    pass
+        # New members this month
+        month_prefix = today.strftime("%Y-%m")
+        new_members_month = len([
+            p for p in self.store.payments
+            if str(p.get("operation_type", "")) == "new_subscription"
+            and str(p.get("created_at", ""))[:7] == month_prefix
+        ])
 
         payments_today_count = len(self._payments_in_range(today, today))
 
@@ -3178,67 +3379,45 @@ class ManagerPage(BasePage):
             btn.repaint()
 
     def _render_payments_html(self, pays: List[Dict[str, Any]], title: str) -> str:
-        today = date.today()
-        total = sum(float(p.get("paid_amount", 0) or 0) for p in pays)
-        count = len(pays)
-        active = [m for m in self.store.members if str(m.get("current_status", "expired")) == "active"]
-        expired = [m for m in self.store.members if str(m.get("current_status", "expired")) == "expired"]
-        with_remaining = [m for m in self.store.members if float(m.get("current_remaining", 0) or 0) > 0]
-        outstanding = sum(float(m.get("current_remaining", 0) or 0) for m in self.store.members)
+        stats = self.store.calculate_period_stats(self._period_start, self._period_end)
 
-        ended_today = 0
-        ended_period = 0
-        for m in self.store.members:
-            last_end = str(m.get("last_subscription_end", "")).strip()
-            if not last_end:
-                continue
-            try:
-                end_date = parse_date(last_end)
-            except Exception:
-                continue
-            if end_date == today:
-                ended_today += 1
-            if self._period_start <= end_date <= self._period_end:
-                ended_period += 1
-
-        period_expense = 0.0
-        for expense in self.store.expenses:
-            date_str = str(expense.get("date", "")).strip()
-            try:
-                exp_date = parse_date(date_str)
-            except Exception:
-                continue
-            if self._period_start <= exp_date <= self._period_end:
-                period_expense += float(expense.get("amount", 0) or 0)
-
-        new_members = 0
-        for m in self.store.members:
-            mid = str(m.get("member_id", ""))
-            if mid.startswith("member_"):
-                try:
-                    ts = int(mid.split("member_")[-1]) / 1000.0
-                    created = datetime.fromtimestamp(ts).date()
-                    if self._period_start <= created <= self._period_end:
-                        new_members += 1
-                except Exception:
-                    pass
-
-        renewals = sum(1 for p in pays if str(p.get("operation_type", "")) == "renewal")
-
-        html = f"<h2 style='margin-bottom:12px;'>{title}</h2>"
-        html += "<div style='display:grid; gap:18px; grid-template-columns:repeat(2, minmax(240px, 1fr)); margin-bottom:18px;'>"
-        html += self._report_metric_card("عدد العمليات", str(count), "#FFFFFF")
-        html += self._report_metric_card("إجمالي الإيراد", money(total), "#B7F56D")
-        html += self._report_metric_card("إجمالي المصروف", money(period_expense), "#FFB8B8")
-        html += self._report_metric_card("إجمالي المتبقي", money(outstanding), "#F3F8FB")
-        html += self._report_metric_card("عليهم متبقي", str(len(with_remaining)), "#FFB8B8")
-        html += self._report_metric_card("المشتركين", str(len(active)), "#7ED321")
-        html += self._report_metric_card("غير المشتركين", str(len(expired)), "#A8B3BC")
-        html += self._report_metric_card("مشتركين جدد", str(new_members), "#7ED321")
-        html += self._report_metric_card("تجديدات", str(renewals), "#D64550")
-        html += self._report_metric_card("انتهى اشتراكهم اليوم", str(ended_today), "#FFB8B8")
-        html += self._report_metric_card("انتهى اشتراكهم خلال الفترة", str(ended_period), "#FFB8B8")
+        html = f"<h2 style='margin-bottom:14px; text-align:right;'>{title}</h2>"
+        html += "<div style='display:grid; gap:16px; grid-template-columns:repeat(3, minmax(200px, 1fr)); margin-bottom:20px; direction:rtl;'>"
+        html += self._report_metric_card("عدد العمليات", str(stats["operations_count"]), "#FFFFFF")
+        html += self._report_metric_card("إجمالي الإيراد المحصل", money(stats["total_collected"]), "#B7F56D")
+        html += self._report_metric_card("إجمالي المصروفات", money(stats["period_expenses"]), "#FFB8B8")
+        html += self._report_metric_card("صافي الدخل", money(stats["net_income"]), "#7ED321")
+        html += self._report_metric_card("إجمالي المتبقيات المستحقة", money(stats["total_receivables"]), "#F3F8FB")
+        html += self._report_metric_card("أعضاء عليهم متبقي", str(stats["members_with_remaining_count"]), "#FFB8B8")
+        html += self._report_metric_card("المشتركين النشطين (Active)", str(stats["active_members_count"]), "#7ED321")
+        html += self._report_metric_card("الاشتراكات المنتهية (Expired)", str(stats["expired_members_count"]), "#A8B3BC")
+        html += self._report_metric_card("مشتركين جدد في الفترة", str(stats["new_members_count"]), "#7ED321")
+        html += self._report_metric_card("تجديدات في الفترة", str(stats["renewals_count"]), "#33CCFF")
+        html += self._report_metric_card("دفع متبقي في الفترة", str(stats["remaining_payments_count"]), "#F3F8FB")
+        html += self._report_metric_card("انتهت اشتراكاتهم ولم يجددوا", str(stats["ended_and_not_renewed_count"]), "#FF6B6B")
+        html += self._report_metric_card("اشتراكات تنتهي في الفترة", str(stats["expiring_soon_count"]), "#FFB8B8")
         html += "</div>"
+
+        # Detailed table of payments in the period
+        if pays:
+            html += "<h3 style='margin-bottom:10px; text-align:right;'>تفاصيل العمليات في هذه الفترة:</h3>"
+            html += "<table style='width:100%; border-collapse:collapse; direction:rtl; font-size:13px; text-align:right;'>"
+            html += "<tr style='background:#182633; color:#A8B3BC; border-bottom:1px solid #23303B;'>"
+            html += "<th style='padding:8px;'>الفاتورة</th><th style='padding:8px;'>الاسم</th><th style='padding:8px;'>الموبايل</th><th style='padding:8px;'>نوع العملية</th><th style='padding:8px;'>الخطة</th><th style='padding:8px;'>المدفوع</th><th style='padding:8px;'>المتبقي</th><th style='padding:8px;'>التاريخ</th>"
+            html += "</tr>"
+            for p in pays:
+                op_title = operation_ar(str(p.get("operation_type", "")))
+                inv = str(p.get("invoice_no", "-"))
+                nm = str(p.get("name", "-"))
+                mob = str(p.get("mobile", "-"))
+                plan = str(p.get("subscription_type", "-"))
+                paid = money(p.get("paid_amount", 0))
+                rem = money(p.get("remaining_amount", 0))
+                dt = str(p.get("created_at", "-"))[:16]
+                html += f"<tr style='border-bottom:1px solid #1c2a38;'>"
+                html += f"<td style='padding:6px;'>{inv}</td><td>{nm}</td><td>{mob}</td><td>{op_title}</td><td>{plan}</td><td style='color:#B7F56D;'>{paid}</td><td style='color:#FFB8B8;'>{rem}</td><td>{dt}</td>"
+                html += "</tr>"
+            html += "</table>"
 
         return html
 
@@ -4056,6 +4235,19 @@ class AddSubscriptionPage(BasePage):
         )
 
     def save(self) -> None:
+        if getattr(self, "_saving", False):
+            return
+        self._saving = True
+        if hasattr(self, "save_button"):
+            self.save_button.setEnabled(False)
+        try:
+            self._do_save()
+        finally:
+            self._saving = False
+            if hasattr(self, "save_button"):
+                self.save_button.setEnabled(True)
+
+    def _do_save(self) -> None:
         debug_log(f"AddSubscriptionPage.save:start mode={self.mode}")
         member = self.current_member() if self.is_smart else (self.selected_member() if self.is_renewal else None)
         if self.is_renewal and member is None:
@@ -4351,6 +4543,19 @@ class RemainingPaymentPage(BasePage):
             self.extend_button.setEnabled(False)
 
     def save(self) -> None:
+        if getattr(self, "_saving", False):
+            return
+        self._saving = True
+        if hasattr(self, "save_button"):
+            self.save_button.setEnabled(False)
+        try:
+            self._do_save()
+        finally:
+            self._saving = False
+            if hasattr(self, "save_button"):
+                self.save_button.setEnabled(True)
+
+    def _do_save(self) -> None:
         member = self.selected_member()
         if member is None:
             QMessageBox.warning(self, "تنبيه", "اختار مشترك صحيح.")
@@ -5879,6 +6084,19 @@ class AddSubscriptionDialog(QDialog):
         )
 
     def save(self) -> None:
+        if getattr(self, "_saving", False):
+            return
+        self._saving = True
+        if hasattr(self, "save_button"):
+            self.save_button.setEnabled(False)
+        try:
+            self._do_save()
+        finally:
+            self._saving = False
+            if hasattr(self, "save_button"):
+                self.save_button.setEnabled(True)
+
+    def _do_save(self) -> None:
         member = self.selected_member() if self.is_renewal else None
         if self.is_renewal and member is None:
             QMessageBox.warning(self, "تنبيه", "لا يوجد مشترك محدد للتجديد.")
@@ -6561,6 +6779,19 @@ class RemainingPaymentDialog(QDialog):
                 self.save_button.setEnabled(False)
 
     def save(self) -> None:
+        if getattr(self, "_saving", False):
+            return
+        self._saving = True
+        if hasattr(self, "save_button"):
+            self.save_button.setEnabled(False)
+        try:
+            self._do_save()
+        finally:
+            self._saving = False
+            if hasattr(self, "save_button"):
+                self.save_button.setEnabled(True)
+
+    def _do_save(self) -> None:
         member = self.selected_member()
         if member is None:
             QMessageBox.warning(self, "تنبيه", "اختار مشترك صحيح.")
@@ -6826,7 +7057,7 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
         return
 
     store.esp_enrollment_active = True
-    progress = QProgressDialog("تسجيل بصمة العضو:\nالخطوة 1 من 2: ضع إصبعك بثبات على القارئ", "إلغاء", 0, 0, parent)
+    progress = QProgressDialog("تسجيل بصمة العضو:\nالخطوة [1/4]: ضع إصبعك بثبات على القارئ", "إلغاء", 0, 0, parent)
     progress.setWindowTitle("تسجيل بصمة عضو")
     progress.setMinimumWidth(420)
     progress.setWindowModality(Qt.WindowModal)
@@ -6840,11 +7071,18 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
     status_timer_active = {"value": True}
 
     ENROLL_STEPS_AR = {
-        "waiting_first_finger": "الخطوة 1 من 2: ضع إصبعك بثبات على القارئ",
+        "waiting_sample_1": "الخطوة [1/4]: ضع إصبعك بثبات على القارئ",
+        "waiting_remove_1": "ممتاز! ارفع إصبعك الآن عن القارئ...",
+        "waiting_sample_2": "الخطوة [2/4]: ضع نفس الإصبع مرة ثانية",
+        "waiting_remove_2": "ممتاز! ارفع إصبعك الآن عن القارئ...",
+        "waiting_sample_3": "الخطوة [3/4]: ضع الإصبع بزاوية مختلفة قليلاً",
+        "waiting_remove_3": "ممتاز! ارفع إصبعك الآن عن القارئ...",
+        "waiting_sample_4": "الخطوة [4/4]: ضع نفس الإصبع للتأكيد الأخير",
+        "waiting_first_finger": "الخطوة [1/4]: ضع إصبعك بثبات على القارئ",
         "waiting_finger_removal": "ممتاز! ارفع إصبعك الآن عن القارئ...",
-        "waiting_second_finger": "الخطوة 2 من 2: ضع نفس الإصبع مرة أخرى للتأكيد",
+        "waiting_second_finger": "الخطوة [2/4]: ضع نفس الإصبع مرة ثانية",
         "waiting_retry_removal": "أعد رفع الإصبع ثم وضعه بزاوية مستقيمة...",
-        "creating_template": "جاري معالجة ومطابقة بصمة الإصبع...",
+        "creating_template": "جاري دمج الصور وتوليد قالب البصمة...",
         "saving": "جاري حفظ البصمة في الذاكرة...",
         "completed": "تم تسجيل البصمة بنجاح!",
         "failed": "فشل تسجيل البصمة",
@@ -6854,17 +7092,17 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
     ENROLL_ERRORS_AR = {
         "first_scan_timeout": "انتهت المهلة قبل وضع الإصبع الأول",
         "remove_finger_timeout": "انتهت المهلة قبل رفع الإصبع",
-        "second_scan_timeout": "انتهت المهلة قبل وضع الإصبع للمرة الثانية",
+        "second_scan_timeout": "انتهت المهلة قبل وضع الإصبع للتأكيد",
         "first_scan_failed": "فشل التقاط صورة البصمة الأولى - يرجى الضغط بثبات",
-        "second_scan_failed": "فشل التقاط صورة البصمة الثانية - يرجى الضغط بثبات",
-        "template_mismatch": "البصمتان غير متطابقتين - تأكد من وضع نفس الإصبع في المرتين",
+        "second_scan_failed": "فشل التقاط صورة البصمة - يرجى الضغط بثبات",
+        "template_mismatch": "تعذر مطابقة البصمة بعد 4 محاولات - يرجى إعادة المحاولة مع تنظيف الحساس",
         "save_failed": "فشل حفظ البصمة في ذاكرة الحساس",
         "cancelled": "تم إلغاء التسجيل",
     }
 
     def finished(result: Dict[str, Any]) -> None:
         if result.get("started") is True:
-            progress.setLabelText("تسجيل بصمة العضو:\nالخطوة 1 من 2: ضع إصبعك بثبات على القارئ")
+            progress.setLabelText("تسجيل بصمة العضو:\nالخطوة [1/4]: ضع إصبعك بثبات على القارئ")
             status_timer.start()
             return
         if cancelled["finished"]:

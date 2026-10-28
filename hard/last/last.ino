@@ -40,6 +40,7 @@ uint16_t minMatchScore = DEFAULT_MIN_MATCH_SCORE;
 #endif
 
 TFT_eSPI tft = TFT_eSPI();
+#include "arabic_font.h"
 WebServer server(80);
 Preferences prefs;
 
@@ -316,8 +317,12 @@ String enrollmentMemberID = "";
 // ASYNCHRONOUS API ENROLLMENT STATE
 // =====================================================
 enum AsyncEnrollState {
-  ENROLL_IDLE, ENROLL_WAIT_FIRST, ENROLL_REMOVE_FIRST,
-  ENROLL_WAIT_SECOND, ENROLL_CREATE_MODEL, ENROLL_RETRY_REMOVE,
+  ENROLL_IDLE,
+  ENROLL_WAIT_FIRST, ENROLL_REMOVE_FIRST,
+  ENROLL_WAIT_SECOND, ENROLL_REMOVE_SECOND,
+  ENROLL_WAIT_THIRD, ENROLL_REMOVE_THIRD,
+  ENROLL_WAIT_FOURTH,
+  ENROLL_CREATE_MODEL, ENROLL_RETRY_REMOVE,
   ENROLL_SAVE, ENROLL_DONE, ENROLL_FAILED, ENROLL_CANCELLED
 };
 
@@ -1449,48 +1454,44 @@ void showMemberInfo()
   searchMode = false;
 
   tft.fillRect(40, 320, 240, 155, TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
 
   if (displayAllowed)
   {
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.drawString("Welcome", 160, 332, 4);
+    drawBitmap1BitFast(160 - (AR_MSG_WELCOME_W / 2), 325, AR_MSG_WELCOME_DATA, AR_MSG_WELCOME_W, AR_MSG_WELCOME_H, TFT_GREEN);
 
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
     String name = displayName;
-    if (name.length() > 22) name = name.substring(0, 22);
-    tft.drawString(name, 160, 368, 4);
+    if (name.length() > 0)
+    {
+      drawArabicDynamicText(name, 160, 360, TFT_WHITE);
+    }
 
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.drawString("Days left: " + String(displayDaysLeft), 160, 405, 4);
+    String daysLine = "متبقي: " + String(displayDaysLeft) + " يوم";
+    drawArabicDynamicText(daysLine, 160, 400, TFT_CYAN);
   }
   else
   {
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("Expired", 160, 332, 4);
+    drawBitmap1BitFast(160 - (AR_STATUS_EXPIRED_W / 2), 325, AR_STATUS_EXPIRED_DATA, AR_STATUS_EXPIRED_W, AR_STATUS_EXPIRED_H, TFT_RED);
 
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
     String name = displayName;
-    if (name.length() > 22) name = name.substring(0, 22);
-    tft.drawString(name, 160, 368, 4);
+    if (name.length() > 0)
+    {
+      drawArabicDynamicText(name, 160, 360, TFT_WHITE);
+    }
 
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
     String expLine;
     if (displayDaysLeft < 0)
     {
-      int daysAgo = -displayDaysLeft;
-      expLine = "Expired " + String(daysAgo) + (daysAgo == 1 ? " day ago" : " days ago");
+      expLine = "منتهي منذ: " + String(-displayDaysLeft) + " يوم";
     }
     else if (displayDaysLeft == 0)
     {
-      expLine = "Expired today";
+      expLine = "انتهى الاشتراك اليوم";
     }
     else
     {
-      expLine = "Ended: " + displayEndDate;
+      expLine = "انتهى: " + displayEndDate;
     }
-    if (expLine.length() > 26) expLine = expLine.substring(0, 26);
-    tft.drawString(expLine, 160, 405, 4);
+    drawArabicDynamicText(expLine, 160, 400, TFT_YELLOW);
   }
 }
 
@@ -2001,33 +2002,43 @@ void setStatus(
   uint16_t color
 )
 {
-  // Only status region
+  tft.fillRect(40, 330, 240, 40, TFT_BLACK);
 
-  tft.fillRect(
-    40,
-    330,
-    240,
-    40,
-    TFT_BLACK
-  );
-
-
-  tft.setTextDatum(
-    MC_DATUM
-  );
-
-  tft.setTextColor(
-    color,
-    TFT_BLACK
-  );
-
-
-  tft.drawString(
-    txt,
-    160,
-    350,
-    4
-  );
+  if (txt == "READY" || txt == "جاهز") {
+    drawBitmap1BitFast(160 - (AR_STATUS_READY_W / 2), 340, AR_STATUS_READY_DATA, AR_STATUS_READY_W, AR_STATUS_READY_H, color);
+  } else if (txt == "SCANNING" || txt == "جاري القراءة") {
+    drawBitmap1BitFast(160 - (AR_STATUS_SCANNING_W / 2), 340, AR_STATUS_SCANNING_DATA, AR_STATUS_SCANNING_W, AR_STATUS_SCANNING_H, color);
+  } else if (txt == "ACCESS GRANTED" || txt == "GRANTED" || txt == "مسموح بالدخول") {
+    drawBitmap1BitFast(160 - (AR_STATUS_GRANTED_W / 2), 340, AR_STATUS_GRANTED_DATA, AR_STATUS_GRANTED_W, AR_STATUS_GRANTED_H, color);
+  } else if (txt == "EXPIRED" || txt == "الاشتراك منتهي") {
+    drawBitmap1BitFast(160 - (AR_STATUS_EXPIRED_W / 2), 340, AR_STATUS_EXPIRED_DATA, AR_STATUS_EXPIRED_W, AR_STATUS_EXPIRED_H, color);
+  } else if (txt == "NOT FOUND" || txt == "غير مسجل") {
+    drawBitmap1BitFast(160 - (AR_STATUS_NOT_FOUND_W / 2), 340, AR_STATUS_NOT_FOUND_DATA, AR_STATUS_NOT_FOUND_W, AR_STATUS_NOT_FOUND_H, color);
+  } else if (txt == "ENROLL [1/4]" || txt == "STEP [1/4]" || txt == "تسجيل [1/4]" || txt == "ENROLL [1/2]") {
+    drawBitmap1BitFast(160 - (AR_STATUS_ENROLL_1_W / 2), 340, AR_STATUS_ENROLL_1_DATA, AR_STATUS_ENROLL_1_W, AR_STATUS_ENROLL_1_H, color);
+  } else if (txt == "ENROLL [2/4]" || txt == "STEP [2/4]" || txt == "تسجيل [2/4]" || txt == "ENROLL [2/2]" || txt == "STEP [2/2]") {
+    drawBitmap1BitFast(160 - (AR_STATUS_ENROLL_2_W / 2), 340, AR_STATUS_ENROLL_2_DATA, AR_STATUS_ENROLL_2_W, AR_STATUS_ENROLL_2_H, color);
+  } else if (txt == "ENROLL [3/4]" || txt == "STEP [3/4]" || txt == "تسجيل [3/4]") {
+    drawBitmap1BitFast(160 - (AR_STATUS_ENROLL_3_W / 2), 340, AR_STATUS_ENROLL_3_DATA, AR_STATUS_ENROLL_3_W, AR_STATUS_ENROLL_3_H, color);
+  } else if (txt == "ENROLL [4/4]" || txt == "STEP [4/4]" || txt == "تسجيل [4/4]") {
+    drawBitmap1BitFast(160 - (AR_STATUS_ENROLL_4_W / 2), 340, AR_STATUS_ENROLL_4_DATA, AR_STATUS_ENROLL_4_W, AR_STATUS_ENROLL_4_H, color);
+  } else if (txt.startsWith("STEP [1/4] OK") || txt.startsWith("STEP [1/2] OK") || txt == "تم الالتقاط بنجاح") {
+    drawBitmap1BitFast(160 - (AR_STATUS_STEP_OK_W / 2), 340, AR_STATUS_STEP_OK_DATA, AR_STATUS_STEP_OK_W, AR_STATUS_STEP_OK_H, color);
+  } else if (txt == "PROCESSING" || txt == "جاري المعالجة") {
+    drawBitmap1BitFast(160 - (AR_STATUS_PROCESSING_W / 2), 340, AR_STATUS_PROCESSING_DATA, AR_STATUS_PROCESSING_W, AR_STATUS_PROCESSING_H, color);
+  } else if (txt == "SAVING" || txt == "جاري الحفظ") {
+    drawBitmap1BitFast(160 - (AR_STATUS_SAVING_W / 2), 340, AR_STATUS_SAVING_DATA, AR_STATUS_SAVING_W, AR_STATUS_SAVING_H, color);
+  } else if (txt == "SUCCESS" || txt == "تم بنجاح") {
+    drawBitmap1BitFast(160 - (AR_STATUS_SUCCESS_W / 2), 340, AR_STATUS_SUCCESS_DATA, AR_STATUS_SUCCESS_W, AR_STATUS_SUCCESS_H, color);
+  } else if (txt == "FAILED" || txt == "فشل التسجيل") {
+    drawBitmap1BitFast(160 - (AR_STATUS_FAILED_W / 2), 340, AR_STATUS_FAILED_DATA, AR_STATUS_FAILED_W, AR_STATUS_FAILED_H, color);
+  } else if (txt == "MISMATCH" || txt == "غير متطابق") {
+    drawBitmap1BitFast(160 - (AR_STATUS_MISMATCH_W / 2), 340, AR_STATUS_MISMATCH_DATA, AR_STATUS_MISMATCH_W, AR_STATUS_MISMATCH_H, color);
+  } else if (txt == "CANCELLED" || txt == "تم الإلغاء") {
+    drawBitmap1BitFast(160 - (AR_STATUS_CANCELLED_W / 2), 340, AR_STATUS_CANCELLED_DATA, AR_STATUS_CANCELLED_W, AR_STATUS_CANCELLED_H, color);
+  } else {
+    drawArabicDynamicText(txt, 160, 340, color);
+  }
 }
 
 
@@ -2039,33 +2050,39 @@ void setMessage(
   String txt
 )
 {
-  // Only message region
+  tft.fillRect(40, 390, 240, 35, TFT_BLACK);
 
-  tft.fillRect(
-    40,
-    390,
-    240,
-    35,
-    TFT_BLACK
-  );
-
-
-  tft.setTextDatum(
-    MC_DATUM
-  );
-
-  tft.setTextColor(
-    TFT_WHITE,
-    TFT_BLACK
-  );
-
-
-  tft.drawString(
-    txt,
-    160,
-    407,
-    4
-  );
+  if (txt == "Place Your Finger" || txt == "ضع إصبعك على القارئ") {
+    drawBitmap1BitFast(160 - (AR_MSG_PLACE_FINGER_W / 2), 398, AR_MSG_PLACE_FINGER_DATA, AR_MSG_PLACE_FINGER_W, AR_MSG_PLACE_FINGER_H, TFT_WHITE);
+  } else if (txt == "Reading Finger..." || txt == "جاري قراءة البصمة...") {
+    drawBitmap1BitFast(160 - (AR_MSG_READING_W / 2), 398, AR_MSG_READING_DATA, AR_MSG_READING_W, AR_MSG_READING_H, TFT_WHITE);
+  } else if (txt == "Welcome" || txt == "أهلاً بك") {
+    drawBitmap1BitFast(160 - (AR_MSG_WELCOME_W / 2), 398, AR_MSG_WELCOME_DATA, AR_MSG_WELCOME_W, AR_MSG_WELCOME_H, TFT_WHITE);
+  } else if (txt == "Subscription Expired" || txt == "يرجى تجديد الاشتراك") {
+    drawBitmap1BitFast(160 - (AR_MSG_PLEASE_RENEW_W / 2), 398, AR_MSG_PLEASE_RENEW_DATA, AR_MSG_PLEASE_RENEW_W, AR_MSG_PLEASE_RENEW_H, TFT_WHITE);
+  } else if (txt == "Fingerprint Not Found" || txt == "البصمة غير موجودة") {
+    drawBitmap1BitFast(160 - (AR_MSG_NOT_FOUND_MSG_W / 2), 398, AR_MSG_NOT_FOUND_MSG_DATA, AR_MSG_NOT_FOUND_MSG_W, AR_MSG_NOT_FOUND_MSG_H, TFT_WHITE);
+  } else if (txt == "Place Finger Firmly" || txt == "ضع الإصبع بثبات") {
+    drawBitmap1BitFast(160 - (AR_MSG_FIRM_FINGER_W / 2), 398, AR_MSG_FIRM_FINGER_DATA, AR_MSG_FIRM_FINGER_W, AR_MSG_FIRM_FINGER_H, TFT_WHITE);
+  } else if (txt == "Lift Finger Now" || txt == "ارفع إصبعك الآن") {
+    drawBitmap1BitFast(160 - (AR_MSG_LIFT_FINGER_W / 2), 398, AR_MSG_LIFT_FINGER_DATA, AR_MSG_LIFT_FINGER_W, AR_MSG_LIFT_FINGER_H, TFT_WHITE);
+  } else if (txt == "Place Same Finger" || txt == "ضع نفس الإصبع") {
+    drawBitmap1BitFast(160 - (AR_MSG_SAME_FINGER_W / 2), 398, AR_MSG_SAME_FINGER_DATA, AR_MSG_SAME_FINGER_W, AR_MSG_SAME_FINGER_H, TFT_WHITE);
+  } else if (txt == "Creating Template..." || txt == "جاري دمج الصور...") {
+    drawBitmap1BitFast(160 - (AR_MSG_CREATING_TEMPLATE_W / 2), 398, AR_MSG_CREATING_TEMPLATE_DATA, AR_MSG_CREATING_TEMPLATE_W, AR_MSG_CREATING_TEMPLATE_H, TFT_WHITE);
+  } else if (txt == "Saving To Sensor..." || txt == "جاري الحفظ في الحساس...") {
+    drawBitmap1BitFast(160 - (AR_MSG_SAVING_SENSOR_W / 2), 398, AR_MSG_SAVING_SENSOR_DATA, AR_MSG_SAVING_SENSOR_W, AR_MSG_SAVING_SENSOR_H, TFT_WHITE);
+  } else if (txt == "Enrollment Complete" || txt == "تم تسجيل البصمة بنجاح") {
+    drawBitmap1BitFast(160 - (AR_MSG_ENROLL_COMPLETE_W / 2), 398, AR_MSG_ENROLL_COMPLETE_DATA, AR_MSG_ENROLL_COMPLETE_W, AR_MSG_ENROLL_COMPLETE_H, TFT_GREEN);
+  } else if (txt == "Enrollment Failed" || txt == "فشل تسجيل البصمة") {
+    drawBitmap1BitFast(160 - (AR_MSG_ENROLL_FAILED_MSG_W / 2), 398, AR_MSG_ENROLL_FAILED_MSG_DATA, AR_MSG_ENROLL_FAILED_MSG_W, AR_MSG_ENROLL_FAILED_MSG_H, TFT_RED);
+  } else if (txt == "Enrollment Cancelled" || txt == "تم إلغاء التسجيل") {
+    drawBitmap1BitFast(160 - (AR_MSG_ENROLL_CANCEL_MSG_W / 2), 398, AR_MSG_ENROLL_CANCEL_MSG_DATA, AR_MSG_ENROLL_CANCEL_MSG_W, AR_MSG_ENROLL_CANCEL_MSG_H, TFT_YELLOW);
+  } else if (txt == "Lift Finger Then Place" || txt == "Lift & Try Again" || txt == "ارفع وحاول ثانية") {
+    drawBitmap1BitFast(160 - (AR_MSG_RETRY_MSG_W / 2), 398, AR_MSG_RETRY_MSG_DATA, AR_MSG_RETRY_MSG_W, AR_MSG_RETRY_MSG_H, TFT_YELLOW);
+  } else {
+    drawArabicDynamicText(txt, 160, 398, TFT_WHITE);
+  }
 }
 
 // =====================================================
@@ -2753,9 +2770,9 @@ void startAsyncEnrollment(int id, const String &memberID)
   displayDaysLeft = 0;
 
   clearDynamicArea();
-  setStatus("ENROLL [1/2]", TFT_CYAN);
+  setStatus("ENROLL [1/4]", TFT_CYAN);
   setMessage("Place Finger Firmly");
-  Serial.println("[ENROLL] ASYNC START");
+  Serial.println("[ENROLL] ASYNC START (4-Sample Engine)");
   Serial.print("[ENROLL] Member ID: "); Serial.println(memberID);
   Serial.print("[ENROLL] Fingerprint ID: "); Serial.println(id);
 }
@@ -2796,19 +2813,21 @@ void processAsyncEnrollment()
       p = finger.getImage();
       if (p == FINGERPRINT_OK)
       {
+        delay(120); // Settling delay for stable skin contact
+        finger.getImage();
         p = finger.image2Tz(1);
         if (p == FINGERPRINT_OK)
         {
-          Serial.println("[ENROLL] STEP 1 OK: First image captured");
+          Serial.println("[ENROLL] SAMPLE 1 OK: Image captured");
           playAudio(1);
-          setStatus("STEP [1/2] OK", TFT_GREEN);
+          setStatus("STEP [1/4] OK", TFT_GREEN);
           setMessage("Lift Finger Now");
           asyncEnrollState = ENROLL_REMOVE_FIRST;
           asyncEnrollStateStarted = millis();
         }
         else
         {
-          Serial.println("[ENROLL] STEP 1 ERROR: Could not extract features");
+          Serial.println("[ENROLL] SAMPLE 1 ERROR: Feature extraction failed");
           finishAsyncEnrollment(false, false, "first_scan_failed"); delay(1000); showReady();
         }
       }
@@ -2823,9 +2842,8 @@ void processAsyncEnrollment()
       p = finger.getImage();
       if (p == FINGERPRINT_NOFINGER)
       {
-        Serial.println("[ENROLL] FINGER REMOVED: Ready for second scan");
-        asyncEnrollSecondAttempts = 0;
-        setStatus("STEP [2/2]", TFT_CYAN);
+        Serial.println("[ENROLL] FINGER REMOVED: Ready for sample 2");
+        setStatus("ENROLL [2/4]", TFT_CYAN);
         setMessage("Place Same Finger");
         asyncEnrollState = ENROLL_WAIT_SECOND;
         asyncEnrollStateStarted = millis();
@@ -2841,30 +2859,37 @@ void processAsyncEnrollment()
       p = finger.getImage();
       if (p == FINGERPRINT_OK)
       {
+        delay(120);
+        finger.getImage();
         p = finger.image2Tz(2);
         if (p == FINGERPRINT_OK)
         {
-          Serial.println("[ENROLL] STEP 2 OK: Second image captured");
-          setStatus("PROCESSING", TFT_MAGENTA);
-          setMessage("Creating Template...");
-          asyncEnrollState = ENROLL_CREATE_MODEL;
-          asyncEnrollStateStarted = millis();
-        }
-        else
-        {
-          asyncEnrollSecondAttempts++;
-          Serial.print("[ENROLL] Second image failed, attempt "); Serial.println(asyncEnrollSecondAttempts);
-          if (asyncEnrollSecondAttempts >= 3)
+          Serial.println("[ENROLL] SAMPLE 2 OK: Checking model");
+          playAudio(1);
+          p = finger.createModel();
+          if (p == FINGERPRINT_OK)
           {
-            finishAsyncEnrollment(false, false, "second_scan_failed"); delay(1000); showReady();
+            Serial.println("[ENROLL] Match on sample 2! Saving template model");
+            setStatus("SAVING", TFT_CYAN);
+            setMessage("Saving To Sensor...");
+            asyncEnrollState = ENROLL_SAVE;
+            asyncEnrollStateStarted = millis();
           }
           else
           {
-            setStatus("RETRY [2/2]", TFT_YELLOW);
-            setMessage("Lift Finger Then Place");
-            asyncEnrollState = ENROLL_RETRY_REMOVE;
+            Serial.println("[ENROLL] Sample 2 not yet matching - proceeding to sample 3");
+            setStatus("ENROLL [3/4]", TFT_YELLOW);
+            setMessage("Lift Finger Now");
+            asyncEnrollState = ENROLL_REMOVE_SECOND;
             asyncEnrollStateStarted = millis();
           }
+        }
+        else
+        {
+          setStatus("RETRY [2/4]", TFT_YELLOW);
+          setMessage("Lift Finger Then Place");
+          asyncEnrollState = ENROLL_REMOVE_FIRST;
+          asyncEnrollStateStarted = millis();
         }
       }
       else if (elapsed >= ASYNC_SECOND_TIMEOUT)
@@ -2874,40 +2899,104 @@ void processAsyncEnrollment()
       }
       break;
 
-    case ENROLL_RETRY_REMOVE:
+    case ENROLL_REMOVE_SECOND:
       p = finger.getImage();
-      if (p == FINGERPRINT_NOFINGER || elapsed >= ASYNC_RETRY_REMOVE_TIMEOUT)
+      if (p == FINGERPRINT_NOFINGER)
       {
-        setStatus("STEP [2/2]", TFT_CYAN);
+        Serial.println("[ENROLL] FINGER REMOVED: Ready for sample 3");
+        setStatus("ENROLL [3/4]", TFT_CYAN);
         setMessage("Place Same Finger");
-        asyncEnrollState = ENROLL_WAIT_SECOND;
+        asyncEnrollState = ENROLL_WAIT_THIRD;
         asyncEnrollStateStarted = millis();
+      }
+      else if (elapsed >= ASYNC_REMOVE_TIMEOUT)
+      {
+        finishAsyncEnrollment(false, false, "remove_finger_timeout"); delay(1000); showReady();
       }
       break;
 
-    case ENROLL_CREATE_MODEL:
-      p = finger.createModel();
+    case ENROLL_WAIT_THIRD:
+      p = finger.getImage();
       if (p == FINGERPRINT_OK)
       {
-        Serial.println("[ENROLL] Template model matched and created");
-        setStatus("SAVING", TFT_CYAN);
-        setMessage("Saving To Sensor...");
-        asyncEnrollState = ENROLL_SAVE;
+        delay(120);
+        finger.getImage();
+        p = finger.image2Tz(2);
+        if (p == FINGERPRINT_OK)
+        {
+          playAudio(1);
+          p = finger.createModel();
+          if (p == FINGERPRINT_OK)
+          {
+            Serial.println("[ENROLL] Match on sample 3! Saving template model");
+            setStatus("SAVING", TFT_CYAN);
+            setMessage("Saving To Sensor...");
+            asyncEnrollState = ENROLL_SAVE;
+            asyncEnrollStateStarted = millis();
+          }
+          else
+          {
+            // Also store sample 3 in Buffer 1 to compare with sample 4
+            finger.image2Tz(1);
+            Serial.println("[ENROLL] Sample 3 stored in Buffer 1 - proceeding to sample 4");
+            setStatus("ENROLL [4/4]", TFT_YELLOW);
+            setMessage("Lift Finger Now");
+            asyncEnrollState = ENROLL_REMOVE_THIRD;
+            asyncEnrollStateStarted = millis();
+          }
+        }
+      }
+      else if (elapsed >= ASYNC_SECOND_TIMEOUT)
+      {
+        finishAsyncEnrollment(false, false, "second_scan_timeout"); delay(1000); showReady();
+      }
+      break;
+
+    case ENROLL_REMOVE_THIRD:
+      p = finger.getImage();
+      if (p == FINGERPRINT_NOFINGER)
+      {
+        Serial.println("[ENROLL] FINGER REMOVED: Ready for sample 4");
+        setStatus("ENROLL [4/4]", TFT_CYAN);
+        setMessage("Place Same Finger");
+        asyncEnrollState = ENROLL_WAIT_FOURTH;
         asyncEnrollStateStarted = millis();
       }
-      else if (asyncEnrollMismatchRetries < 2)
+      else if (elapsed >= ASYNC_REMOVE_TIMEOUT)
       {
-        asyncEnrollMismatchRetries++;
-        Serial.print("[ENROLL] Template mismatch - retry "); Serial.println(asyncEnrollMismatchRetries);
-        setStatus("MISMATCH", TFT_YELLOW);
-        setMessage("Lift & Try Again");
-        asyncEnrollState = ENROLL_RETRY_REMOVE;
-        asyncEnrollStateStarted = millis();
+        finishAsyncEnrollment(false, false, "remove_finger_timeout"); delay(1000); showReady();
       }
-      else
+      break;
+
+    case ENROLL_WAIT_FOURTH:
+      p = finger.getImage();
+      if (p == FINGERPRINT_OK)
       {
-        Serial.println("[ENROLL] ERROR: Prints do not match");
-        finishAsyncEnrollment(false, false, "template_mismatch"); delay(1500); showReady();
+        delay(120);
+        finger.getImage();
+        p = finger.image2Tz(2);
+        if (p == FINGERPRINT_OK)
+        {
+          playAudio(1);
+          p = finger.createModel();
+          if (p == FINGERPRINT_OK)
+          {
+            Serial.println("[ENROLL] Match on sample 4! Saving template model");
+            setStatus("SAVING", TFT_CYAN);
+            setMessage("Saving To Sensor...");
+            asyncEnrollState = ENROLL_SAVE;
+            asyncEnrollStateStarted = millis();
+          }
+          else
+          {
+            Serial.println("[ENROLL] ERROR: Prints do not match after 4 samples");
+            finishAsyncEnrollment(false, false, "template_mismatch"); delay(1500); showReady();
+          }
+        }
+      }
+      else if (elapsed >= ASYNC_SECOND_TIMEOUT)
+      {
+        finishAsyncEnrollment(false, false, "second_scan_timeout"); delay(1000); showReady();
       }
       break;
 
@@ -2946,9 +3035,13 @@ void handleEnrollStatus()
   const char *step = "idle";
   switch (asyncEnrollState)
   {
-    case ENROLL_WAIT_FIRST: step = "waiting_first_finger"; break;
-    case ENROLL_REMOVE_FIRST: step = "waiting_finger_removal"; break;
-    case ENROLL_WAIT_SECOND: step = "waiting_second_finger"; break;
+    case ENROLL_WAIT_FIRST: step = "waiting_sample_1"; break;
+    case ENROLL_REMOVE_FIRST: step = "waiting_remove_1"; break;
+    case ENROLL_WAIT_SECOND: step = "waiting_sample_2"; break;
+    case ENROLL_REMOVE_SECOND: step = "waiting_remove_2"; break;
+    case ENROLL_WAIT_THIRD: step = "waiting_sample_3"; break;
+    case ENROLL_REMOVE_THIRD: step = "waiting_remove_3"; break;
+    case ENROLL_WAIT_FOURTH: step = "waiting_sample_4"; break;
     case ENROLL_RETRY_REMOVE: step = "waiting_retry_removal"; break;
     case ENROLL_CREATE_MODEL: step = "creating_template"; break;
     case ENROLL_SAVE: step = "saving"; break;
@@ -3034,7 +3127,8 @@ bool enrollFingerprint(int id)
     delay(20);
   }
 
-
+  delay(120);
+  finger.getImage();
   p =
     finger.image2Tz(1);
 
@@ -3164,6 +3258,8 @@ bool enrollFingerprint(int id)
       delay(20);
     }
 
+    delay(120);
+    finger.getImage();
     p = finger.image2Tz(2);
     server.handleClient();
 
