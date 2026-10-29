@@ -60,7 +60,7 @@
   "google_auth_fingerprint": "38b69df08da3332834f076d48e7b1534fda9e9caabd1c848141f8bc2d9705600",
   "search_bar_x": 0,
   "search_bar_y": 0,
-  "esp_ip": "192.168.0.254",
+  "esp_ip": "192.168.1.254",
   "esp_port": 80,
   "esp_enabled": true,
   "whatsapp_send_mode": "paste",

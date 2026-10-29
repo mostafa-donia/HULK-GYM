@@ -300,7 +300,7 @@ def set_keyboard_layout_to_english():
 
     print("[set_keyboard_layout_to_english_once] Sending Alt+Shift once to switch layout.")
     try:
-        pyautogui.hotkey("alt", "shift")
+        pyautogui.hotkey("win", "space",interval=1)
         sleep(0.25)
     except Exception as exc:
         print(f"[set_keyboard_layout_to_english_once] Switch layout skipped/failed: {exc}")
@@ -465,9 +465,7 @@ def send_message(phone: str, message: str = "", image: str = None, topic: str = 
         except Exception as exc:
             print(f"[send_message] Error formatting message: {exc}")
 
-    set_keyboard_layout_to_english()
-    random_delay(0.35, 0.8)
-    set_keyboard_layout_to_english()
+
 
     print("is it english?")
     global unsent
@@ -490,9 +488,12 @@ def send_message(phone: str, message: str = "", image: str = None, topic: str = 
     
     copy(message)
     random_delay(3, 5)
-    pyautogui.hotkey('ctrl', 'v',interval=1.1)
-    random_delay(2.4, 4.8)
-    print("typing5")
+    pyautogui.keyDown('ctrl')
+    random_delay()
+    pyautogui.press('v')
+    random_delay()
+    pyautogui.keyUp('ctrl')
+    random_delay(2,3)
 
     press("enter")
     random_delay(1.35, 2.75)
@@ -513,8 +514,6 @@ def sending(phones: list, messages: list, groups: list = None, image: str = None
         if not messages:
             return "No messages available"
 
-        set_keyboard_layout_to_english()
-        random_delay(1.5, 2.8)
         print(f"[sending] Called with {len(phones)} phones, {len(selected_groups)} topics")
         for i, phone in enumerate(phones):
             print(f"[sending]   Phone {i}: {phone} | topic={selected_groups[i]}")
@@ -592,7 +591,6 @@ def sending(phones: list, messages: list, groups: list = None, image: str = None
     if len(messages) == 1:
         message = messages[0]
         print(f"[sending] Single message mode: {len(message)} chars")
-        set_keyboard_layout_to_english()
         whatsupp_ready()
         for phone in phones:
             print(f"[sending] Sending to {phone}")

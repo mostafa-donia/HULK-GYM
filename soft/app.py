@@ -1205,6 +1205,15 @@ class Store:
             self.settings["whatsapp_letter_delay"] = defaults["whatsapp_letter_delay"]
             changed = True
 
+        try:
+            port_val = int(self.settings.get("esp_port", 80) or 80)
+            if port_val <= 0 or port_val > 65535 or port_val != 80:
+                self.settings["esp_port"] = 80
+                changed = True
+        except Exception:
+            self.settings["esp_port"] = 80
+            changed = True
+
         whatsapp_mode = str(self.settings.get("whatsapp_send_mode", defaults["whatsapp_send_mode"])).strip().lower()
         if whatsapp_mode not in {"typing", "paste"}:
             self.settings["whatsapp_send_mode"] = defaults["whatsapp_send_mode"]
@@ -4145,7 +4154,6 @@ class MemberDetailsPage(BasePage):
             self.set_member(self.member)
 
         thread.done.connect(finished)
-        thread.finished.connect(thread.deleteLater)
         thread.start()
 
     def edit_member(self) -> None:
@@ -5613,6 +5621,7 @@ class SettingsPage(BasePage):
         self.esp_port.setMinimum(1)
         self.esp_port.setMaximum(65535)
         self.esp_port.setValue(80)
+        self.esp_port.wheelEvent = lambda event: event.ignore()
         esp_layout.addWidget(make_label("Port رقم الاتصال", "fieldLabel"), 1, 1)
         esp_layout.addWidget(self.esp_port, 1, 0)
 
@@ -7375,50 +7384,62 @@ class GoogleContactsQueueFlushThread(QThread):
             self.done.emit({"ok": False, "synced_count": 0, "error": str(exc)})
 
 
+_ACTIVE_ESP_THREADS: set[QThread] = set()
+
 class ESPOperationThread(QThread):
     done = Signal(dict)
 
     def __init__(self, operation: str, settings: Dict[str, Any], **kwargs: Any) -> None:
         super().__init__()
         self.operation = operation
-        self.settings = settings
+        self.settings = dict(settings or {})
         self.kwargs = kwargs
 
+    def start(self, priority=QThread.Priority.InheritPriority) -> None:
+        _ACTIVE_ESP_THREADS.add(self)
+        self.finished.connect(self._safe_cleanup)
+        super().start(priority)
+
+    def _safe_cleanup(self) -> None:
+        QTimer.singleShot(2000, lambda: _ACTIVE_ESP_THREADS.discard(self))
+
     def run(self) -> None:  # type: ignore[override]
-        if self.operation == "enroll":
-            result = esp_client.enroll_member(self.settings, str(self.kwargs["member_id"]))
-        elif self.operation == "cancel_enroll":
-            result = esp_client.cancel_enrollment(self.settings, str(self.kwargs["member_id"]))
-        elif self.operation == "enroll_status":
-            result = esp_client.get_enroll_status(self.settings)
-        elif self.operation == "status":
-            result = esp_client.get_esp_status(self.settings)
-        elif self.operation == "last_scan":
-            result = esp_client.get_last_scan(self.settings)
-        elif self.operation == "display_member":
-            result = esp_client.display_member(self.settings, self.kwargs["member_data"])
-        elif self.operation == "sync":
-            if not ESP_SYNC_LOCK.acquire(blocking=False):
-                result = {"success": False, "error": "sync_in_progress"}
-            else:
-                try:
-                    status = esp_client.get_esp_status(self.settings)
-                    if not status.get("success"):
-                        result = {
-                            "success": False,
-                            "error": "esp_offline",
-                            "error_detail": status.get("error", status.get("error_detail", "ESP status check failed")),
-                        }
-                    else:
-                        result = esp_client.push_members(self.settings, self.kwargs["members"])
-                finally:
-                    ESP_SYNC_LOCK.release()
-        elif self.operation == "delete":
-            result = esp_client.delete_fingerprint(self.settings, self.kwargs["fingerprint_id"])
-        elif self.operation == "clear_all_fingerprints":
-            result = esp_client.clear_all_fingerprints(self.settings)
-        else:
-            result = {"success": False, "error": "unknown_operation"}
+        result = {"success": False, "error": "unknown_operation"}
+        try:
+            if self.operation == "enroll":
+                result = esp_client.enroll_member(self.settings, str(self.kwargs["member_id"]))
+            elif self.operation == "cancel_enroll":
+                result = esp_client.cancel_enrollment(self.settings, str(self.kwargs["member_id"]))
+            elif self.operation == "enroll_status":
+                result = esp_client.get_enroll_status(self.settings)
+            elif self.operation == "status":
+                result = esp_client.get_esp_status(self.settings)
+            elif self.operation == "last_scan":
+                result = esp_client.get_last_scan(self.settings)
+            elif self.operation == "display_member":
+                result = esp_client.display_member(self.settings, self.kwargs["member_data"])
+            elif self.operation == "sync":
+                if not ESP_SYNC_LOCK.acquire(blocking=False):
+                    result = {"success": False, "error": "sync_in_progress"}
+                else:
+                    try:
+                        status = esp_client.get_esp_status(self.settings)
+                        if not status.get("success"):
+                            result = {
+                                "success": False,
+                                "error": "esp_offline",
+                                "error_detail": status.get("error", status.get("error_detail", "ESP status check failed")),
+                            }
+                        else:
+                            result = esp_client.push_members(self.settings, self.kwargs["members"])
+                    finally:
+                        ESP_SYNC_LOCK.release()
+            elif self.operation == "delete":
+                result = esp_client.delete_fingerprint(self.settings, self.kwargs["fingerprint_id"])
+            elif self.operation == "clear_all_fingerprints":
+                result = esp_client.clear_all_fingerprints(self.settings)
+        except Exception as exc:
+            result = {"success": False, "error": "exception", "error_detail": str(exc)}
         self.done.emit(result)
 
 
@@ -7589,7 +7610,6 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
 
     progress.canceled.connect(cancel_requested)
     thread.done.connect(finished)
-    thread.finished.connect(thread.deleteLater)
     thread.start()
     progress.show()
     status_timer.timeout.connect(poll_enrollment_status)
@@ -7616,7 +7636,6 @@ def start_members_sync(parent: QWidget, store: Store, success_prefix: str = "") 
             QMessageBox.warning(parent, "فشل المزامنة", f"SYNC FAILED: {error}")
 
     thread.done.connect(finished)
-    thread.finished.connect(thread.deleteLater)
     thread.start()
     progress.show()
 
@@ -8983,26 +9002,28 @@ class FingerprintDevicePage(BasePage):
             self.status_label.setText("ESP غير مفعل. من فضلك فعّل الاتصال بـ ESP من الإعدادات أولاً.")
             return
         self.test_btn.setEnabled(False)
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            result = esp_client.get_esp_status(self.store.settings)
-        finally:
-            QApplication.restoreOverrideCursor()
+        self.status_label.setText("جاري فحص الاتصال بـ ESP...")
+        thread = ESPOperationThread("status", self.store.settings)
+        self._test_thread = thread
+
+        def status_done(result: Dict[str, Any]) -> None:
             self.test_btn.setEnabled(True)
+            if not result.get("success"):
+                kind = result.get("error_kind", "unknown")
+                detail = result.get("error_detail", "")
+                self.status_label.setText(f"فشل الاتصال ({kind}): {detail}")
+                return
 
-        if not result.get("success"):
-            kind = result.get("error_kind", "unknown")
-            detail = result.get("error_detail", "")
-            self.status_label.setText(f"فشل الاتصال ({kind}): {detail}")
-            return
+            self.status_label.setText(
+                "متصل ✓\n"
+                f"الجهاز: {result.get('device', '-')}\n"
+                f"الواي فاي: {result.get('wifi', '-')}\n"
+                f"قارئ البصمة: {'موجود' if result.get('fingerprint') else 'غير موجود'}\n"
+                f"عدد الأعضاء المحملين: {result.get('members', '-')}"
+            )
 
-        self.status_label.setText(
-            "متصل ✓\n"
-            f"الجهاز: {result.get('device', '-')}\n"
-            f"الواي فاي: {result.get('wifi', '-')}\n"
-            f"قارئ البصمة: {'موجود' if result.get('fingerprint') else 'غير موجود'}\n"
-            f"عدد الأعضاء المحملين: {result.get('members', '-')}"
-        )
+        thread.done.connect(status_done)
+        thread.start()
 
     def _test_members_payload(self, first_allowed: bool = True) -> Dict[str, Dict[str, Any]]:
         return {
@@ -9033,7 +9054,6 @@ class FingerprintDevicePage(BasePage):
                 self.sync_status_label.setText(f"SYNC FAILED: {error}")
 
         thread.done.connect(finished)
-        thread.finished.connect(thread.deleteLater)
         thread.start()
         progress.show()
 
@@ -9044,24 +9064,26 @@ class FingerprintDevicePage(BasePage):
         self.push_test_btn.setEnabled(False)
         self.deny_test_btn.setEnabled(False)
         self.allow_test_btn.setEnabled(False)
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            result = esp_client.push_members(self.store.settings, members)
-        finally:
-            QApplication.restoreOverrideCursor()
+        self.status_label.setText("جاري إرسال قاعدة الاختبار إلى ESP...")
+        thread = ESPOperationThread("sync", self.store.settings, members=members)
+        self._push_test_thread = thread
+
+        def push_done(result: Dict[str, Any]) -> None:
             self.push_test_btn.setEnabled(True)
             self.deny_test_btn.setEnabled(True)
             self.allow_test_btn.setEnabled(True)
+            if not result.get("success"):
+                error = result.get("error", result.get("error_detail", "فشل مزامنة قاعدة الأعضاء"))
+                self.status_label.setText(f"فشل إرسال قاعدة الاختبار: {error}")
+                return
 
-        if not result.get("success"):
-            error = result.get("error", result.get("error_detail", "فشل مزامنة قاعدة الأعضاء"))
-            self.status_label.setText(f"فشل إرسال قاعدة الاختبار: {error}")
-            return
+            self.status_label.setText(
+                "تم إرسال قاعدة الاختبار ✓\n"
+                f"الأعضاء المؤكدون من ESP: {result.get('members', '-')}"
+            )
 
-        self.status_label.setText(
-            "تم إرسال قاعدة الاختبار ✓\n"
-            f"الأعضاء المؤكدون من ESP: {result.get('members', '-')}"
-        )
+        thread.done.connect(push_done)
+        thread.start()
 
     def push_test_members(self) -> None:
         self._push_test_payload(self._test_members_payload(True))
@@ -9161,7 +9183,6 @@ class MainWindow(QMainWindow):
         thread = ESPOperationThread("sync", self.store.settings, members=self.store.esp_members_payload())
         self.esp_startup_sync_thread = thread
         thread.done.connect(self.on_background_esp_sync_done)
-        thread.finished.connect(self.on_background_esp_sync_finished)
         thread.start()
 
     def on_background_esp_sync_done(self, result: Dict[str, Any]) -> None:
@@ -9214,7 +9235,6 @@ class MainWindow(QMainWindow):
             self.set_esp_status(self.store.esp_connected)
 
         thread.done.connect(status_done)
-        thread.finished.connect(lambda: setattr(self, "esp_status_thread", None))
         thread.start()
 
     def start_esp_scan_polling(self) -> None:
@@ -9242,7 +9262,6 @@ class MainWindow(QMainWindow):
             self.handle_esp_scan(result)
 
         thread.done.connect(scan_done)
-        thread.finished.connect(lambda: setattr(self, "esp_scan_thread", None))
         thread.start()
 
     def handle_esp_scan(self, scan: Dict[str, Any]) -> None:

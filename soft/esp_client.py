@@ -39,7 +39,12 @@ def is_enabled(settings: Dict[str, Any]) -> bool:
 
 def base_url(settings: Dict[str, Any]) -> str:
     ip = str(settings.get("esp_ip", "192.168.1.254")).strip() or "192.168.1.254"
-    port = int(settings.get("esp_port", 80) or 80)
+    try:
+        port = int(settings.get("esp_port", 80) or 80)
+    except Exception:
+        port = 80
+    if port <= 0 or port > 65535:
+        port = 80
     return f"http://{ip}:{port}"
 
 
@@ -118,6 +123,12 @@ def get_esp_status(settings: Dict[str, Any], timeout: float = 5.0) -> Dict[str, 
 
 
 def validate_members_payload(members: Dict[str, Any]) -> Optional[str]:
+    """Ensure the payload matches the strict schema the ESP32 expects.
+
+    Members must be a dict mapping member_id -> {fingerprint_id: int, allowed: bool}.
+    Any unexpected fields, names, or non-int fingerprint IDs are rejected here before
+    wasting an HTTP round-trip. Returns None on success or an error string on error.
+    """
     if not isinstance(members, dict):
         return "invalid_members"
     if len(members) > 1000:
@@ -125,31 +136,34 @@ def validate_members_payload(members: Dict[str, Any]) -> Optional[str]:
     for member_id, record in members.items():
         if not isinstance(member_id, str) or not member_id.strip():
             return "invalid_member_id"
-        if not isinstance(record, dict) or set(record) != {"fingerprint_id", "allowed"}:
+        if not isinstance(record, dict):
             return "invalid_member_record"
-        fingerprint_id = record["fingerprint_id"]
+        if set(record.keys()) != {"fingerprint_id", "allowed"}:
+            return "invalid_member_record"
+        fingerprint_id = record.get("fingerprint_id")
         if isinstance(fingerprint_id, bool) or not isinstance(fingerprint_id, int) or not 1 <= fingerprint_id <= 1000:
             return "invalid_fingerprint_id"
-        if not isinstance(record["allowed"], bool):
-            return "invalid_allowed"
+        if not isinstance(record.get("allowed"), bool):
+            return "invalid_allowed_flag"
     return None
 
 
 def push_members(settings: Dict[str, Any], members: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
-    """POST /members - push the complete {member_id: {fingerprint_id, allowed}} database.
-
-    `members` must NOT contain names/phones/payment data, only fingerprint_id/allowed
-    per member_id. Never raises: returns {"success": False, "error_kind"/"error_detail"}
-    (network failure) or {"success": False, "error": "..."} (ESP rejected the payload)
-    instead of ever claiming success unless the ESP32 actually confirmed it.
-    """
+    """POST /members - push the complete {member_id: {fingerprint_id, allowed}} database."""
     validation_error = validate_members_payload(members)
     if validation_error:
         _log(f"Sync failed before request: {validation_error}")
         return {"success": False, "error": validation_error}
     try:
         _log(f"Syncing {len(members)} members")
-        result = _request(settings, "POST", "/members", payload={"members": members}, timeout=timeout)
+        result = _request(
+            settings,
+            "POST",
+            "/members",
+            payload={"members": members},
+            timeout=timeout,
+            retries=2,
+        )
         result.setdefault("success", False)
         _log("Sync successful" if result.get("success") else "Sync failed")
         return result
@@ -170,7 +184,7 @@ def enroll_member(settings: Dict[str, Any], member_id: str, timeout: float = 90.
             settings,
             "POST",
             "/enroll",
-            payload={"member_id": str(member_id)},
+            payload={"member_id": member_id},
             timeout=timeout,
             retries=0,
         )
@@ -274,7 +288,7 @@ def delete_fingerprint(settings: Dict[str, Any], fingerprint_id: Any, timeout: f
         _log(f"Deleting fingerprint: {fingerprint_id}")
         result = _request(
             settings,
-            "DELETE",
+            "POST" if settings.get("use_post_for_delete") else "DELETE",
             "/fingerprint",
             payload={"fingerprint_id": fingerprint_id},
             timeout=timeout,
@@ -291,6 +305,7 @@ def delete_fingerprint(settings: Dict[str, Any], fingerprint_id: Any, timeout: f
             "error_kind": exc.kind,
             "error_detail": exc.detail,
         }
+
 
 def clear_all_fingerprints(settings: Dict[str, Any], timeout: float = 10.0) -> Dict[str, Any]:
     """Wipe all fingerprint templates from the ESP R307 sensor database."""
@@ -313,4 +328,3 @@ def clear_all_fingerprints(settings: Dict[str, Any], timeout: float = 10.0) -> D
             "error_kind": exc.kind,
             "error_detail": exc.detail,
         }
-
