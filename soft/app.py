@@ -2608,18 +2608,65 @@ class Store:
         lm_end = date(lm_year, lm_month, calendar.monthrange(lm_year, lm_month)[1])
         lm_stats = self.calculate_period_stats(lm_start, lm_end)
 
-        # Members who ended last month and still haven't renewed
+        # Members who were with us last month (active during last month) and did NOT renew this month
         unrenewed_from_last_month: List[Dict[str, Any]] = []
+        cm_start = m_start
+
         for m in self.members:
-            end_raw = str(m.get("last_subscription_end", "")).strip()
-            if not end_raw:
+            # Check if member had any active subscription during last month (was with us)
+            was_with_us_last_month = False
+            history = m.get("subscriptions_history", [])
+            for sub in history:
+                s_raw = str(sub.get("subscription_start", "")).strip()
+                e_raw = str(sub.get("subscription_end", "")).strip()
+                if s_raw and e_raw:
+                    try:
+                        s_dt = parse_date(s_raw)
+                        e_dt = parse_date(e_raw)
+                        if s_dt <= lm_end and e_dt >= lm_start:
+                            was_with_us_last_month = True
+                            break
+                    except Exception:
+                        pass
+            if not was_with_us_last_month:
+                last_s = str(m.get("last_subscription_start", "")).strip()
+                last_e = str(m.get("last_subscription_end", "")).strip()
+                if last_s and last_e:
+                    try:
+                        s_dt = parse_date(last_s)
+                        e_dt = parse_date(last_e)
+                        if s_dt <= lm_end and e_dt >= lm_start:
+                            was_with_us_last_month = True
+                    except Exception:
+                        pass
+                elif last_e:
+                    try:
+                        e_dt = parse_date(last_e)
+                        if lm_start <= e_dt <= lm_end:
+                            was_with_us_last_month = True
+                    except Exception:
+                        pass
+
+            if not was_with_us_last_month:
                 continue
-            try:
-                ed = parse_date(end_raw)
-                if lm_start <= ed <= lm_end and str(m.get("current_status", "expired")) == "expired":
-                    unrenewed_from_last_month.append(m)
-            except Exception:
-                pass
+
+            # Check if member renewed this month
+            renewed_this_month = False
+            if str(m.get("current_status", "expired")) == "active":
+                renewed_this_month = True
+            else:
+                for sub in history:
+                    sub_start_raw = str(sub.get("subscription_start", "")).strip()
+                    if sub_start_raw:
+                        try:
+                            if parse_date(sub_start_raw) >= cm_start:
+                                renewed_this_month = True
+                                break
+                        except Exception:
+                            pass
+
+            if not renewed_this_month:
+                unrenewed_from_last_month.append(m)
 
         # Members ending this week
         ending_this_week: List[Dict[str, Any]] = []
@@ -5598,25 +5645,10 @@ class DashboardPage(BasePage):
         quick_actions.addWidget(remaining_list_btn)
         self.root.addLayout(quick_actions)
 
-        ai_row = QHBoxLayout()
-        ai_row.setDirection(QBoxLayout.Direction.RightToLeft)
-        ai_row.setContentsMargins(0, 4, 0, 0)
-        ai_btn = QPushButton("🤖 استشارة الذكاء الاصطناعي وقرارات الإدارة")
-        ai_btn.setObjectName("dashboardActionButton")
-        ai_btn.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0F4C81, stop:1 #1E88E5); color: #FFFFFF; font-weight: bold; font-size: 14px; min-height: 44px;")
-        ai_btn.clicked.connect(self._open_ai_insights)
-        ai_row.addWidget(ai_btn)
-        self.root.addLayout(ai_row)
+
 
         self.root.addStretch(1)
         self.refresh()
-
-    def _open_ai_insights(self) -> None:
-        if hasattr(self.window(), "open_ai_insights"):
-            self.window().open_ai_insights()
-        else:
-            dlg = AIInsightsDialog(self.store, self)
-            dlg.exec()
 
     def _open_unified_entry(self) -> None:
         if self.open_unified_callback is not None:
