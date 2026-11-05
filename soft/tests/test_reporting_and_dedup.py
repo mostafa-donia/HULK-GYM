@@ -163,5 +163,69 @@ class TestReportingAndDeduplication(unittest.TestCase):
         self.assertIn("إجمالي المتبقيات المستحقة", msg)
 
 
+
+    def test_duplicate_name_and_phone_blocked(self):
+        """Adding a new subscription with identical normalized name and phone should be rejected."""
+        p1 = self.store.add_payment({
+            "operation_type": "new_subscription",
+            "name": "أحمد محمد علي",
+            "mobile": "01099998888",
+            "gender": "male",
+            "subscription_type": "شهر",
+            "subscription_start": "2026-11-01",
+            "paid_amount": 350.0,
+            "payment_method": "نقدي",
+        })
+        self.assertIsNotNone(p1)
+
+        # Same name and phone (different tashkeel/alef) must raise ValueError
+        with self.assertRaises(ValueError):
+            self.store.add_payment({
+                "operation_type": "new_subscription",
+                "name": "احمد محمد علي",
+                "mobile": "01099998888",
+                "gender": "male",
+                "subscription_type": "شهر",
+                "subscription_start": "2026-11-02",
+                "paid_amount": 350.0,
+                "payment_method": "نقدي",
+            })
+
+    def test_brothers_sharing_same_phone_allowed(self):
+        """Brothers with different names but same phone number should be permitted."""
+        p1 = self.store.add_payment({
+            "operation_type": "new_subscription",
+            "name": "سيف الدين محمود",
+            "mobile": "01055554444",
+            "gender": "male",
+            "subscription_type": "شهر",
+            "subscription_start": "2026-11-01",
+            "paid_amount": 350.0,
+            "payment_method": "نقدي",
+        })
+        p2 = self.store.add_payment({
+            "operation_type": "new_subscription",
+            "name": "عمر الدين محمود",
+            "mobile": "01055554444",
+            "gender": "male",
+            "subscription_type": "شهر",
+            "subscription_start": "2026-11-01",
+            "paid_amount": 350.0,
+            "payment_method": "نقدي",
+        })
+        self.assertNotEqual(p1["member_id"], p2["member_id"])
+        same_phone = self.store.find_members_by_mobile("01055554444")
+        self.assertEqual(len(same_phone), 2)
+
+    def test_ai_insights_structure(self):
+        """Store.get_ai_insights should return peak hours, unrenewed counts, and actionable advice."""
+        insights = self.store.get_ai_insights()
+        self.assertIn("peak_hours_str", insights)
+        self.assertIn("busiest_day_str", insights)
+        self.assertIn("unrenewed_from_last_month", insights)
+        self.assertIn("recommendations", insights)
+        self.assertIsInstance(insights["recommendations"], list)
+
+
 if __name__ == "__main__":
     unittest.main()

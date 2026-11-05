@@ -247,6 +247,16 @@ def normalize_mobile(value: str) -> str:
     return normalized
 
 
+def normalize_name(value: str) -> str:
+    s = str(value or '').strip().lower()
+    s = re.sub(r'[\u064B-\u065F\u0670]', '', s)
+    s = re.sub(r'[إأآا]', 'ا', s)
+    s = s.replace('ة', 'ه')
+    s = s.replace('ى', 'ي')
+    s = re.sub(r'\s+', ' ', s)
+    return s.strip()
+
+
 def normalize_clock_time(value: str) -> str:
     """Normalize flexible time input to HH:MM (24-hour), else return empty string."""
     raw = str(value or "").strip()
@@ -1822,11 +1832,27 @@ class Store:
         return None
 
     def find_member_by_name(self, name: str) -> Optional[Dict[str, Any]]:
-        query = str(name).strip().lower()
+        query = normalize_name(name)
         if not query:
             return None
         for member in self.members:
-            if str(member.get("name", "")).strip().lower() == query:
+            if normalize_name(str(member.get("name", ""))) == query:
+                return member
+        return None
+
+    def find_members_by_mobile(self, mobile: str) -> List[Dict[str, Any]]:
+        n = normalize_mobile(mobile)
+        if not n:
+            return []
+        return [m for m in self.members if normalize_mobile(str(m.get("mobile", ""))) == n]
+
+    def find_member_by_name_and_mobile(self, name: str, mobile: str) -> Optional[Dict[str, Any]]:
+        norm_n = normalize_name(name)
+        norm_m = normalize_mobile(mobile)
+        if not norm_n or not norm_m:
+            return None
+        for member in self.members:
+            if normalize_name(str(member.get("name", ""))) == norm_n and normalize_mobile(str(member.get("mobile", ""))) == norm_m:
                 return member
         return None
 
@@ -2099,7 +2125,15 @@ class Store:
         paid_amount = float(payload["paid_amount"])
         payment_method = str(payload["payment_method"])
 
-        member = self.find_member_by_mobile(mobile)
+        member_id_arg = str(payload.get("member_id", "")).strip()
+        member = None
+        if member_id_arg:
+            member = next((m for m in self.members if str(m.get("member_id", "")).strip() == member_id_arg), None)
+        if member is None:
+            member = self.find_member_by_name_and_mobile(name, mobile)
+        if member is None and operation_type == "renewal":
+            member = self.find_member_by_mobile(mobile)
+
         if operation_type == "renewal" and member is None:
             raise ValueError("المشترك غير موجود. استخدم اشتراك جديد لو ده أول تسجيل له.")
         if operation_type == "renewal" and float(member.get("current_remaining", 0) or 0) > 0:
@@ -2114,7 +2148,11 @@ class Store:
         for existing_p in reversed(self.payments[-15:]):
             same_identity = (
                 (member and existing_p.get("member_id") == member.get("member_id"))
-                or (mobile and normalize_mobile(str(existing_p.get("mobile", ""))) == mobile)
+                or (
+                    normalize_name(name) == normalize_name(str(existing_p.get("name", "")))
+                    and mobile
+                    and normalize_mobile(str(existing_p.get("mobile", ""))) == mobile
+                )
             )
             if (
                 same_identity
@@ -2133,6 +2171,10 @@ class Store:
                     pass
 
         if operation_type == "new_subscription":
+            dup_exact = self.find_member_by_name_and_mobile(name, mobile)
+            if dup_exact is not None and str(dup_exact.get("member_id", "")).strip() != member_id_arg:
+                raise ValueError("لا يمكن تكرار المشترك: الاسم ورقم الهاتف مسجلان بالفعل لعضو موجود.")
+
             member = {
                 "member_id": self.next_id("MEM", self.members, "member_id"),
                 "member_type": "member",
@@ -2509,6 +2551,120 @@ class Store:
             "plan_types": plan_types,
             "daily_breakdown": daily_breakdown,
             "avg_transaction": avg_transaction,
+        }
+
+    def get_ai_insights(self) -> Dict[str, Any]:
+        """Generate intelligent business insights, peak hours, renewal attrition, and actionable recommendations."""
+        self.refresh_statuses(save=False)
+        today = date.today()
+
+        # 1. Peak registration and payment hours
+        hour_counts: Dict[int, int] = {}
+        day_of_week_counts: Dict[str, int] = {}
+        AR_DAYS = {0: "الإثنين", 1: "الثلاثاء", 2: "الأربعاء", 3: "الخميس", 4: "الجمعة", 5: "السبت", 6: "الأحد"}
+
+        for p in self.payments:
+            c_str = str(p.get("created_at", "")).strip()
+            if not c_str:
+                continue
+            try:
+                dt = parse_datetime(c_str)
+                if dt:
+                    h = dt.hour
+                    hour_counts[h] = hour_counts.get(h, 0) + 1
+                    d_name = AR_DAYS.get(dt.weekday(), "")
+                    day_of_week_counts[d_name] = day_of_week_counts.get(d_name, 0) + 1
+            except Exception:
+                pass
+
+        peak_hours_str = "غير محدد"
+        if hour_counts:
+            sorted_hours = sorted(hour_counts.items(), key=lambda x: x[1], reverse=True)
+            top_h, top_count = sorted_hours[0]
+            start_fmt = f"{top_h % 12 or 12}:00 {'مساءً' if top_h >= 12 else 'صباحاً'}"
+            end_h = (top_h + 2) % 24
+            end_fmt = f"{end_h % 12 or 12}:00 {'مساءً' if end_h >= 12 else 'صباحاً'}"
+            peak_hours_str = f"من {start_fmt} إلى {end_fmt} (تسجيل {top_count} عملية)"
+
+        busiest_day_str = "غير محدد"
+        if day_of_week_counts:
+            busiest_day_str = max(day_of_week_counts.items(), key=lambda x: x[1])[0]
+
+        # 2. Month-over-month attrition and retention
+        # Current month
+        m_start = date(today.year, today.month, 1)
+        cur_m_stats = self.calculate_period_stats(m_start, today)
+        new_this_month = cur_m_stats["new_members_count"]
+        renewals_this_month = cur_m_stats["renewals_count"]
+
+        # Last month range
+        if today.month == 1:
+            lm_year = today.year - 1
+            lm_month = 12
+        else:
+            lm_year = today.year
+            lm_month = today.month - 1
+        lm_start = date(lm_year, lm_month, 1)
+        lm_end = date(lm_year, lm_month, calendar.monthrange(lm_year, lm_month)[1])
+        lm_stats = self.calculate_period_stats(lm_start, lm_end)
+
+        # Members who ended last month and still haven't renewed
+        unrenewed_from_last_month: List[Dict[str, Any]] = []
+        for m in self.members:
+            end_raw = str(m.get("last_subscription_end", "")).strip()
+            if not end_raw:
+                continue
+            try:
+                ed = parse_date(end_raw)
+                if lm_start <= ed <= lm_end and str(m.get("current_status", "expired")) == "expired":
+                    unrenewed_from_last_month.append(m)
+            except Exception:
+                pass
+
+        # Members ending this week
+        ending_this_week: List[Dict[str, Any]] = []
+        w_end = today + timedelta(days=7)
+        for m in self.members:
+            if str(m.get("current_status", "expired")) == "active":
+                end_raw = str(m.get("last_subscription_end", "")).strip()
+                if end_raw:
+                    try:
+                        ed = parse_date(end_raw)
+                        if today <= ed <= w_end:
+                            ending_this_week.append(m)
+                    except Exception:
+                        pass
+
+        # Attrition rate
+        total_ended_lm = lm_stats["ended_in_period_count"]
+        churn_pct = round((len(unrenewed_from_last_month) / total_ended_lm * 100), 1) if total_ended_lm > 0 else 0.0
+
+        # Actionable recommendations
+        tips: List[str] = []
+        if len(unrenewed_from_last_month) > 0:
+            tips.append(f"يوجد {len(unrenewed_from_last_month)} عضواً انتهت اشتراكاتهم الشهر الماضي ولم يجددوا حتى الآن. يُنصح بإرسال رسائل عروض تحفيزية لهم عبر واتساب.")
+        if len(ending_this_week) > 0:
+            tips.append(f"يوجد {len(ending_this_week)} أعضاء ستنتهي اشتراكاتهم خلال الأسبوع القادم. تأكد من إرسال تذكيرات التجديد المسبقة.")
+        if peak_hours_str != "غير محدد":
+            tips.append(f"أوقات الذروة الأكثر نشاطاً هي {peak_hours_str}. احرص على تواجد الكابتن والاستقبال لتنظيم الحصص والاشتراكات.")
+        if cur_m_stats["total_receivables"] > 0:
+            tips.append(f"إجمالي متبقيات وديون الأعضاء {money(cur_m_stats['total_receivables'])} على {cur_m_stats['members_with_remaining_count']} عضو. مراجعة المتبقيات ستعزز السيولة النقدية فوراً.")
+        if not tips:
+            tips.append("أداء النادي يسير بشكل متوازن ومستقر.")
+
+        return {
+            "peak_hours_str": peak_hours_str,
+            "busiest_day_str": busiest_day_str,
+            "new_this_month": new_this_month,
+            "renewals_this_month": renewals_this_month,
+            "unrenewed_from_last_month": unrenewed_from_last_month,
+            "unrenewed_last_month_count": len(unrenewed_from_last_month),
+            "ending_this_week": ending_this_week,
+            "ending_this_week_count": len(ending_this_week),
+            "churn_pct": churn_pct,
+            "active_members_count": cur_m_stats["active_members_count"],
+            "total_receivables": cur_m_stats["total_receivables"],
+            "recommendations": tips,
         }
 
     def build_daily_report_message(self) -> str:
@@ -3528,6 +3684,14 @@ class ManagerPage(BasePage):
         self.pdf_export_btn.clicked.connect(self.export_current_report_pdf)
         controls.addWidget(self.pdf_export_btn)
 
+        self.ai_btn = QPushButton("🤖 استشارة الذكاء الاصطناعي")
+        self.ai_btn.setObjectName("primaryButton")
+        self.ai_btn.setFixedHeight(30)
+        self.ai_btn.setFont(QFont("Segoe UI", 9))
+        self.ai_btn.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0077B6, stop:1 #0096C7); color: #FFFFFF; font-weight: bold;")
+        self.ai_btn.clicked.connect(self.open_ai_insights_dialog)
+        controls.addWidget(self.ai_btn)
+
         self.report_buttons = [self.day_btn, self.week_btn, self.month_btn]
         self._period_start = date.today()
         self._period_end = date.today()
@@ -3550,6 +3714,10 @@ class ManagerPage(BasePage):
         self.refresh()
         self.populate_month_selector()
         self.report_day()
+
+    def open_ai_insights_dialog(self) -> None:
+        dlg = AIInsightsDialog(self.store, self)
+        dlg.exec()
 
     def _payments_in_range(self, start_date: date, end_date: date) -> List[Dict[str, Any]]:
         pays: List[Dict[str, Any]] = []
@@ -4589,10 +4757,30 @@ class AddSubscriptionPage(BasePage):
                 self.pay_remaining_callback(str(member.get("member_id", "")))
             return
         normalized_mobile = normalize_mobile(mobile)
-        existing = member or self.store.find_member_by_mobile(normalized_mobile)
+        existing = member or self.store.find_member_by_name_and_mobile(name, normalized_mobile) or self.store.find_member_by_mobile(normalized_mobile)
+        is_new_sub = not self.is_renewal and not (self.is_smart and existing)
+        if is_new_sub:
+            dup_exact = self.store.find_member_by_name_and_mobile(name, normalized_mobile)
+            if dup_exact is not None:
+                QMessageBox.warning(self, "تنبيه تكرار المشترك", f"لا يمكن تسجيل المشترك: الاسم '{name}' ورقم الهاتف مسجلان بالفعل لعضو موجود.")
+                return
+            same_phone_members = self.store.find_members_by_mobile(normalized_mobile)
+            if same_phone_members:
+                other_names = "، ".join(str(m.get("name", "")) for m in same_phone_members if str(m.get("name", "")).strip())
+                ans = QMessageBox.question(
+                    self,
+                    "تنبيه اشتراك رقم الهاتف",
+                    f"رقم الموبايل ({mobile}) مسجل بالفعل لعضو آخر: ({other_names}).\n(مثل إخوة أو أقارب يشتركون بنفس الرقم).\n\nهل تريد المتابعة وتسجيل مشترك جديد بهذا الرقم؟",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if ans != QMessageBox.Yes:
+                    return
+
         try:
             payload = {
                 "operation_type": "renewal" if (self.is_renewal or (self.is_smart and existing)) else "new_subscription",
+                "member_id": str(existing.get("member_id", "")) if existing else "",
                 "name": name,
                 "mobile": normalize_mobile(mobile),
                 "gender": gender,
@@ -5410,8 +5598,25 @@ class DashboardPage(BasePage):
         quick_actions.addWidget(remaining_list_btn)
         self.root.addLayout(quick_actions)
 
+        ai_row = QHBoxLayout()
+        ai_row.setDirection(QBoxLayout.Direction.RightToLeft)
+        ai_row.setContentsMargins(0, 4, 0, 0)
+        ai_btn = QPushButton("🤖 استشارة الذكاء الاصطناعي وقرارات الإدارة")
+        ai_btn.setObjectName("dashboardActionButton")
+        ai_btn.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0F4C81, stop:1 #1E88E5); color: #FFFFFF; font-weight: bold; font-size: 14px; min-height: 44px;")
+        ai_btn.clicked.connect(self._open_ai_insights)
+        ai_row.addWidget(ai_btn)
+        self.root.addLayout(ai_row)
+
         self.root.addStretch(1)
         self.refresh()
+
+    def _open_ai_insights(self) -> None:
+        if hasattr(self.window(), "open_ai_insights"):
+            self.window().open_ai_insights()
+        else:
+            dlg = AIInsightsDialog(self.store, self)
+            dlg.exec()
 
     def _open_unified_entry(self) -> None:
         if self.open_unified_callback is not None:
@@ -6501,9 +6706,30 @@ class AddSubscriptionDialog(QDialog):
         if self.is_renewal and member and float(member.get("current_remaining", 0) or 0) > 0:
             QMessageBox.warning(self, "تنبيه", "لا يمكن تجديد الاشتراك قبل دفع المتبقي. استخدم زر دفع المتبقي الأول.")
             return
+
+        normalized_mobile = normalize_mobile(mobile)
+        if not self.is_renewal:
+            dup_exact = self.store.find_member_by_name_and_mobile(name, normalized_mobile)
+            if dup_exact is not None:
+                QMessageBox.warning(self, "تنبيه تكرار المشترك", f"لا يمكن تسجيل المشترك: الاسم '{name}' ورقم الهاتف مسجلان بالفعل لعضو موجود.")
+                return
+            same_phone_members = self.store.find_members_by_mobile(normalized_mobile)
+            if same_phone_members:
+                other_names = "، ".join(str(m.get("name", "")) for m in same_phone_members if str(m.get("name", "")).strip())
+                ans = QMessageBox.question(
+                    self,
+                    "تنبيه اشتراك رقم الهاتف",
+                    f"رقم الموبايل ({mobile}) مسجل بالفعل لعضو آخر: ({other_names}).\n(مثل إخوة أو أقارب يشتركون بنفس الرقم).\n\nهل تريد المتابعة وتسجيل مشترك جديد بهذا الرقم؟",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if ans != QMessageBox.Yes:
+                    return
+
         try:
             payload = {
                 "operation_type": "renewal" if self.is_renewal else "new_subscription",
+                "member_id": str(member.get("member_id", "")) if member else "",
                 "name": name,
                 "mobile": mobile,
                 "gender": gender,
@@ -6739,10 +6965,27 @@ class EditMemberDialog(QDialog):
             QMessageBox.warning(self, "تنبيه", error_msg)
             return
 
+        normalized_mobile_value = normalize_mobile(mobile)
         if self.member:
+            # Editing member: check if new name + phone collides with another member
+            dup_exact = self.store.find_member_by_name_and_mobile(name, normalized_mobile_value)
+            if dup_exact is not None and str(dup_exact.get("member_id", "")) != str(self.member.get("member_id", "")):
+                QMessageBox.warning(self, "تنبيه تكرار المشترك", f"لا يمكن تعديل البيانات: الاسم '{name}' ورقم الهاتف مسجلان بالفعل لعضو آخر.")
+                return
+            same_phone_members = [m for m in self.store.find_members_by_mobile(normalized_mobile_value) if str(m.get("member_id", "")) != str(self.member.get("member_id", ""))]
+            if same_phone_members and normalized_mobile_value != normalize_mobile(str(self.member.get("mobile", ""))):
+                other_names = "، ".join(str(m.get("name", "")) for m in same_phone_members if str(m.get("name", "")).strip())
+                ans = QMessageBox.question(
+                    self,
+                    "تنبيه رقم الهاتف",
+                    f"رقم الموبايل ({mobile}) مسجل لعضو آخر: ({other_names}).\nهل تريد المتابعة واستخدام نفس الرقم لهذا العضو؟",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if ans != QMessageBox.Yes:
+                    return
+
             debug_log(f"EditMemberDialog._save_impl:editing member_id={self.member.get('member_id', '')}")
-            # Multiple different member names may share the same phone number.
-            normalized_mobile_value = normalize_mobile(mobile)
 
             # Update existing member
             original_paid = float(self.member.get("current_paid", 0) or 0)
@@ -6828,7 +7071,24 @@ class EditMemberDialog(QDialog):
             QMessageBox.information(self, "تم", "تم تحديث بيانات العضو.")
             debug_log("EditMemberDialog._save_impl:member-updated-success")
         else:
-            # Add new member. The same phone may belong to different member names.
+            # Add new member: prevent duplicate name and phone; warn if phone shared
+            dup_exact = self.store.find_member_by_name_and_mobile(name, normalized_mobile_value)
+            if dup_exact is not None:
+                QMessageBox.warning(self, "تنبيه تكرار المشترك", f"لا يمكن تسجيل المشترك: الاسم '{name}' ورقم الهاتف مسجلان بالفعل لعضو موجود.")
+                return
+            same_phone_members = self.store.find_members_by_mobile(normalized_mobile_value)
+            if same_phone_members:
+                other_names = "، ".join(str(m.get("name", "")) for m in same_phone_members if str(m.get("name", "")).strip())
+                ans = QMessageBox.question(
+                    self,
+                    "تنبيه اشتراك رقم الهاتف",
+                    f"رقم الموبايل ({mobile}) مسجل بالفعل لعضو آخر: ({other_names}).\n(مثل إخوة أو أقارب يشتركون بنفس الرقم).\n\nهل تريد المتابعة وتسجيل مشترك جديد بهذا الرقم؟",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if ans != QMessageBox.Yes:
+                    return
+            # Add new member.
             member_id = f"member_{int(time.time() * 1000)}"
             new_member = {
                 "member_id": member_id,
@@ -7016,11 +7276,30 @@ class AddFollowUpDialog(QDialog):
             QMessageBox.warning(self, "تنبيه", error_msg)
             return
 
+        normalized_mobile = normalize_mobile(mobile)
+        dup_exact = self.store.find_member_by_name_and_mobile(name, normalized_mobile)
+        if dup_exact is not None:
+            QMessageBox.warning(self, "تنبيه تكرار المشترك", f"لا يمكن الحفظ: الاسم '{name}' ورقم الهاتف مسجلان بالفعل لعضو موجود.")
+            return
+
+        same_phone_members = self.store.find_members_by_mobile(normalized_mobile)
+        if same_phone_members:
+            other_names = "، ".join(str(m.get("name", "")) for m in same_phone_members if str(m.get("name", "")).strip())
+            ans = QMessageBox.question(
+                self,
+                "تنبيه اشتراك رقم الهاتف",
+                f"رقم الموبايل ({mobile}) مسجل بالفعل لعضو آخر: ({other_names}).\n(مثل إخوة أو أقارب يشتركون بنفس الرقم).\n\nهل تريد المتابعة وحفظ متابعة بهذا الرقم؟",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ans != QMessageBox.Yes:
+                return
+
         member_id = f"member_{int(time.time() * 1000)}"
         new_member = {
             "member_id": member_id,
             "name": name,
-            "mobile": normalize_mobile(mobile),
+            "mobile": normalized_mobile,
             "gender": gender,
             "member_type": "regular",
             "subscriptions_history": [],
@@ -7182,6 +7461,205 @@ class RemainingPaymentDialog(QDialog):
             return
         QMessageBox.information(self, "تم", f"تم حفظ دفع المتبقي رقم {payment['invoice_no']}")
         self.accept()
+
+
+class AIInsightsDialog(QDialog):
+    """AI business insights and recommendations dialog with custom WhatsApp follow-up queueing."""
+
+    def __init__(self, store: Store, parent: Optional[QWidget] = None, open_whatsapp_callback: Optional[Callable[[], None]] = None) -> None:
+        super().__init__(parent)
+        self.store = store
+        self.open_whatsapp_callback = open_whatsapp_callback
+        self.setWindowTitle("مستشار الذكاء الاصطناعي - إحصائيات وتوصيات اتخاذ القرار")
+        self.setMinimumWidth(820)
+        fit_dialog_to_screen(self, 980, 720)
+        self.setLayoutDirection(Qt.RightToLeft)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        layout, _scroll = create_dialog_shell(outer, max_width=920)
+
+        # Header
+        header = QHBoxLayout()
+        header.setDirection(QBoxLayout.Direction.RightToLeft)
+        header.setSpacing(10)
+        title = make_label("🤖 مستشار وقرارات الذكاء الاصطناعي", "dialogTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        sub = make_label("تحليل فوري لأوقات الذروة، حركة تجديد الاشتراكات، الأعضاء الذين لم يجددوا، مع إمكانية إضافتهم للواتساب برسالة مخصصة.", "smallMuted")
+        sub.setWordWrap(True)
+        layout.addWidget(sub)
+
+        # Load insights
+        self.insights = self.store.get_ai_insights()
+
+        # Metrics cards
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        grid.setContentsMargins(0, 10, 0, 10)
+
+        def make_kpi(t: str, val: str, sub_t: str = "", color: str = "#7ED321") -> QFrame:
+            card = QFrame()
+            card.setObjectName("settingsBox")
+            card.setStyleSheet(f"background:#0F1B24; border:1px solid #23303B; border-radius:12px; padding:12px;")
+            l = QVBoxLayout(card)
+            l.setContentsMargins(8, 8, 8, 8)
+            l.setSpacing(4)
+            l.addWidget(make_label(t, "smallMuted"))
+            val_lbl = QLabel(val)
+            val_lbl.setStyleSheet(f"color:{color}; font-size:18px; font-weight:800;")
+            l.addWidget(val_lbl)
+            if sub_t:
+                s_lbl = QLabel(sub_t)
+                s_lbl.setStyleSheet("color:#758A99; font-size:11px;")
+                l.addWidget(s_lbl)
+            return card
+
+        grid.addWidget(make_kpi("⏰ وقت الذروة بالصالة", self.insights["peak_hours_str"], f"اليوم الأكثر إقبالاً: {self.insights['busiest_day_str']}", "#33CCFF"), 0, 0)
+        grid.addWidget(make_kpi("👥 مشتركين جدد هذا الشهر", str(self.insights["new_this_month"]), f"تجديدات الشهر: {self.insights['renewals_this_month']}", "#7ED321"), 0, 1)
+        grid.addWidget(make_kpi("⚠️ لم يجددوا من الشهر الماضي", str(self.insights["unrenewed_last_month_count"]), f"نسبة تسرب الاشتراكات: {self.insights['churn_pct']}%", "#FF8080"), 1, 0)
+        grid.addWidget(make_kpi("⏳ تنتهي اشتراكاتهم هذا الأسبوع", str(self.insights["ending_this_week_count"]), f"إجمالي المشتركين النشطين: {self.insights['active_members_count']}", "#FFAA00"), 1, 1)
+        layout.addLayout(grid)
+
+        # Recommendations list
+        recs_box = QFrame()
+        recs_box.setObjectName("settingsBox")
+        recs_box.setStyleSheet("background:#13222F; border:1px solid #1C3347; border-radius:12px; padding:14px;")
+        recs_layout = QVBoxLayout(recs_box)
+        recs_layout.setSpacing(6)
+        recs_title = make_label("💡 نصائح وتوصيات الذكاء الاصطناعي لتطوير الصالة وزيادة الإيراد:", "fieldLabel")
+        recs_title.setStyleSheet("color:#33CCFF; font-weight:bold; font-size:13px;")
+        recs_layout.addWidget(recs_title)
+        for tip in self.insights["recommendations"]:
+            t_lbl = QLabel(f"• {tip}")
+            t_lbl.setWordWrap(True)
+            t_lbl.setStyleSheet("color:#E2E8F0; font-size:12px; line-height:1.5;")
+            recs_layout.addWidget(t_lbl)
+        layout.addWidget(recs_box)
+
+        # WhatsApp Campaign section
+        layout.addSpacing(10)
+        wa_header = make_label("📲 تجهيز حملة واتساب للذين لم يجددوا اشتراكاتهم:", "fieldLabel")
+        wa_header.setStyleSheet("color:#B7F56D; font-weight:bold; font-size:13px;")
+        layout.addWidget(wa_header)
+
+        # Message template editor
+        default_tpl = "أهلاً بك كابتن {name}، اشتقنالك في HULK GYM! 💪 اشتراكك انتهى في {end_date}. جهزنالك عرض خاص للتجديد هذا الأسبوع، مستنيينك تنورنا!"
+        self.tpl_edit = QTextEdit()
+        self.tpl_edit.setPlaceholderText("اكتب نص الرسالة هنا... يمكنك استخدام المتغيرات: {name} و {end_date}")
+        self.tpl_edit.setPlainText(default_tpl)
+        self.tpl_edit.setFixedHeight(75)
+        self.tpl_edit.setObjectName("searchInput")
+        layout.addWidget(self.tpl_edit)
+
+        # Members list scroll
+        layout.addWidget(make_label(f"قائمة الأعضاء المستهدفين ({len(self.insights['unrenewed_from_last_month'])} عضو):", "smallMuted"))
+        list_scroll = QScrollArea()
+        list_scroll.setWidgetResizable(True)
+        list_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        list_scroll.setFixedHeight(160)
+        list_content = QWidget()
+        list_layout = QVBoxLayout(list_content)
+        list_layout.setContentsMargins(0, 0, 0, 0)
+        list_layout.setSpacing(4)
+
+        self.member_checkboxes: List[tuple[QCheckBox, Dict[str, Any]]] = []
+        for m in self.insights["unrenewed_from_last_month"]:
+            m_row = QFrame()
+            m_row.setObjectName("settingsBox")
+            m_layout = QHBoxLayout(m_row)
+            m_layout.setContentsMargins(8, 4, 8, 4)
+            m_layout.setSpacing(8)
+            cb = QCheckBox()
+            cb.setChecked(True)
+            m_layout.addWidget(cb)
+            e_str = display_date(str(m.get("last_subscription_end", "")))
+            m_lbl = QLabel(f"{m.get('name', '')}  |  {m.get('mobile', '')}  |  انتهى في: {e_str}")
+            m_lbl.setStyleSheet("color:#F1F5F9; font-size:12px;")
+            m_layout.addWidget(m_lbl, 1)
+            list_layout.addWidget(m_row)
+            self.member_checkboxes.append((cb, m))
+
+        if not self.insights["unrenewed_from_last_month"]:
+            empty_lbl = QLabel("لا يوجد أعضاء انتهت اشتراكاتهم الشهر الماضي بدون تجديد.")
+            empty_lbl.setStyleSheet("color:#758A99; font-size:12px;")
+            list_layout.addWidget(empty_lbl)
+
+        list_layout.addStretch(1)
+        list_scroll.setWidget(list_content)
+        layout.addWidget(list_scroll)
+
+        # Actions
+        actions_row = QHBoxLayout()
+        actions_row.setDirection(QBoxLayout.Direction.RightToLeft)
+        actions_row.setSpacing(10)
+
+        self.queue_btn = QPushButton("إضافة كمعلق في واتساب (Pending) 🟢")
+        self.queue_btn.setObjectName("primaryButton")
+        self.queue_btn.setFixedHeight(36)
+        self.queue_btn.clicked.connect(self.queue_campaign_messages)
+        actions_row.addWidget(self.queue_btn)
+
+        close_btn = QPushButton("إغلاق")
+        close_btn.setObjectName("secondaryButton")
+        close_btn.setFixedHeight(36)
+        close_btn.clicked.connect(self.reject)
+        actions_row.addWidget(close_btn)
+        actions_row.addStretch(1)
+        layout.addLayout(actions_row)
+
+    def queue_campaign_messages(self) -> None:
+        tpl = self.tpl_edit.toPlainText().strip()
+        if not tpl:
+            QMessageBox.warning(self, "تنبيه", "اكتب نص الرسالة أولاً.")
+            return
+
+        selected = [m for cb, m in self.member_checkboxes if cb.isChecked()]
+        if not selected:
+            QMessageBox.warning(self, "تنبيه", "لم يتم اختيار أي عضو لإرسال الرسائل له.")
+            return
+
+        queued_items = []
+        for m in selected:
+            mob = normalize_mobile(str(m.get("mobile", "")))
+            if not mob:
+                continue
+            e_raw = str(m.get("last_subscription_end", "")).strip()
+            e_disp = display_date(e_raw) if e_raw else ""
+            msg_text = tpl.replace("{name}", str(m.get("name", "")).strip()).replace("{end_date}", e_disp)
+            item = self.store.queue_whatsapp_message(
+                mobile=mob,
+                message=msg_text,
+                msg_type="expired",
+                recipient_name=str(m.get("name", "")),
+                recipient_type="member",
+                reference_id=str(m.get("member_id", "")),
+                dedup_key=f"ai_campaign:{m.get('member_id', '')}:{now_str()[:10]}",
+                save=False,
+            )
+            if item is not None:
+                queued_items.append(item)
+
+        if queued_items:
+            self.store.save_whatsapp()
+            reply = QMessageBox.question(
+                self,
+                "تمت الإضافة بنجاح",
+                f"تمت إضافة {len(queued_items)} رسالة مخصصة إلى قائمة الواتساب كمعلق (Pending).\n\nهل تريد الذهاب إلى صفحة الواتساب الآن لمراجعتها أو إرسالها؟",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                self.accept()
+                if self.open_whatsapp_callback is not None:
+                    self.open_whatsapp_callback()
+            else:
+                self.accept()
+        else:
+            QMessageBox.information(self, "واتساب", "الرسائل مضافة بالفعل مسبقاً في قائمة الانتظار لهذا اليوم.")
 
 
 class AddExpenseDialog(QDialog):
@@ -9660,6 +10138,10 @@ class MainWindow(QMainWindow):
                     break
         if hasattr(members_page, "refresh"):
             members_page.refresh()  # type: ignore[attr-defined]
+
+    def open_ai_insights(self) -> None:
+        dlg = AIInsightsDialog(self.store, self, open_whatsapp_callback=lambda: self.navigate("whatsapp"))
+        dlg.exec()
 
     def open_expired_members_page(self) -> None:
         self.navigate("members")
