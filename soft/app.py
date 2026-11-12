@@ -22,7 +22,7 @@ import time
 import traceback
 import time
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import esp_client
 
@@ -626,6 +626,71 @@ def parse_datetime(raw: str) -> Optional[datetime]:
         return datetime.fromisoformat(raw[:19])
     except Exception:
         return None
+
+
+def norm_dt(s: Any) -> str:
+    if s is None:
+        return ""
+    val = str(s).strip()
+    if val.lower() in ("", "none", "null", "undefined", "false"):
+        return ""
+    if len(val) == 10 and val[4] == "-" and val[7] == "-":
+        return val + " 00:00:00"
+    if len(val) == 16 and val[4] == "-" and val[7] == "-" and val[10] == " ":
+        return val + ":00"
+    return val
+
+
+def member_latest_activity_timestamp(m: Dict[str, Any]) -> str:
+    candidates: List[str] = []
+    c = norm_dt(m.get("updated_at"))
+    if c:
+        candidates.append(c)
+    c = norm_dt(m.get("last_payment_date"))
+    if c:
+        candidates.append(c)
+    history = m.get("subscriptions_history")
+    if isinstance(history, list):
+        for sub in history:
+            if isinstance(sub, dict):
+                c = norm_dt(sub.get("created_at"))
+                if c:
+                    candidates.append(c)
+                c = norm_dt(sub.get("subscription_start"))
+                if c:
+                    candidates.append(c)
+    c = norm_dt(m.get("last_subscription_start"))
+    if c:
+        candidates.append(c)
+    c = norm_dt(m.get("created_at"))
+    if c:
+        candidates.append(c)
+    c = norm_dt(m.get("last_subscription_end"))
+    if c:
+        candidates.append(c)
+    return max(candidates) if candidates else ""
+
+
+def member_sort_key(m: Dict[str, Any]) -> Tuple[str, str, str]:
+    ts = member_latest_activity_timestamp(m)
+    end = norm_dt(m.get("last_subscription_end"))
+    mid = str(m.get("member_id", ""))
+    return (ts, end, mid)
+
+
+def payment_latest_activity_timestamp(p: Dict[str, Any]) -> str:
+    candidates: List[str] = []
+    for field in ("updated_at", "created_at", "subscription_start"):
+        c = norm_dt(p.get(field))
+        if c:
+            candidates.append(c)
+    return max(candidates) if candidates else ""
+
+
+def payment_sort_key(p: Dict[str, Any]) -> Tuple[str, str]:
+    ts = payment_latest_activity_timestamp(p)
+    inv = str(p.get("invoice_no", "") or p.get("payment_id", ""))
+    return (ts, inv)
 
 
 def add_months(d: date, months: int) -> date:
@@ -2024,6 +2089,7 @@ class Store:
 
         new_end, remaining_before, remaining_after, days_added = self.calculate_remaining_extension(member, paid_amount, days)
 
+        curr_p_time = now_str()
         payment = {
             "payment_id": self.next_id("PAY", self.payments, "payment_id"),
             "invoice_no": self.next_id("INV", self.payments, "invoice_no"),
@@ -2040,7 +2106,8 @@ class Store:
             "subscription_end": new_end,
             "payment_method": payment_method,
             "status": "paid" if remaining_after <= 0 else "partial",
-            "created_at": now_str(),
+            "created_at": curr_p_time,
+            "updated_at": curr_p_time,
             "days_added": days_added,
         }
         self.payments.append(payment)
@@ -2049,6 +2116,7 @@ class Store:
 
         member["last_subscription_end"] = new_end
         member["last_payment_date"] = payment["created_at"]
+        member["updated_at"] = payment["created_at"]
         member["current_paid"] = float(member.get("current_paid", 0) or 0) + float(paid_amount or 0)
         member["current_remaining"] = remaining_after
         member["total_paid"] = float(member.get("total_paid", 0) or 0) + float(paid_amount or 0)
@@ -2092,6 +2160,7 @@ class Store:
         if self.find_member_by_mobile(mobile) is not None:
             raise ValueError("رقم الموبايل ده مسجل بالفعل في الأعضاء.")
 
+        lead_ts = now_str()
         member = {
             "member_id": self.next_id("MEM", self.members, "member_id"),
             "member_type": "lead",
@@ -2108,7 +2177,8 @@ class Store:
             "total_paid": 0,
             "follow_up_date": follow_up_date,
             "notes": notes,
-            "created_at": now_str(),
+            "created_at": lead_ts,
+            "updated_at": lead_ts,
             "subscriptions_history": [],
         }
         self.members.append(member)
@@ -2193,6 +2263,8 @@ class Store:
                 "notes": "",
                 "subscriptions_history": [],
                 "fingerprint_id": "",
+                "created_at": curr_time_str,
+                "updated_at": curr_time_str,
             }
             self.members.append(member)
         elif member is None:
@@ -2214,6 +2286,8 @@ class Store:
                 "notes": "",
                 "subscriptions_history": [],
                 "fingerprint_id": "",
+                "created_at": curr_time_str,
+                "updated_at": curr_time_str,
             }
             self.members.append(member)
         else:
@@ -2222,6 +2296,7 @@ class Store:
             member["gender"] = gender
             member["member_type"] = "member"
 
+        pay_now = now_str()
         payment = {
             "payment_id": self.next_id("PAY", self.payments, "payment_id"),
             "invoice_no": self.next_id("INV", self.payments, "invoice_no"),
@@ -2238,7 +2313,8 @@ class Store:
             "subscription_end": subscription_end,
             "payment_method": payment_method,
             "status": payment_status,
-            "created_at": now_str(),
+            "created_at": pay_now,
+            "updated_at": pay_now,
         }
         self.payments.append(payment)
 
@@ -2248,6 +2324,7 @@ class Store:
         member["last_subscription_end"] = payment["subscription_end"]
         member["last_subscription_type"] = payment["subscription_type"]
         member["last_payment_date"] = payment["created_at"]
+        member["updated_at"] = payment["created_at"]
         member["current_paid"] = paid_amount
         member["current_remaining"] = remaining
         member["total_paid"] = float(member.get("total_paid", 0) or 0) + paid_amount
@@ -3507,16 +3584,7 @@ class MembersTablePage(BasePage):
             self.gender_filter.currentData() if hasattr(self, "gender_filter") else "all",
             self.search.text() if hasattr(self, "search") else "",
         )
-        if page_filter == "expired":
-            def end_sort(member: Dict[str, Any]) -> date:
-                end_date = str(member.get("last_subscription_end", ""))
-                if not end_date:
-                    return date.min
-                return parse_date(end_date)
-
-            rows = sorted(rows, key=end_sort, reverse=True)
-        else:
-            rows = sorted(rows, key=lambda m: str(m.get("last_payment_date", "")), reverse=True)
+        rows = sorted(rows, key=member_sort_key, reverse=True)
         headers = ["ID", "الاسم", "الموبايل", "نوع الاشتراك", "دفع", "متبقي", "البداية", "النهاية", "حالة الأيام", "الحالة", "رقم البصمة"]
         if self.page_filter == "expired":
             headers.extend(["تاريخ المتابعة", "ملاحظات"] )
@@ -3567,6 +3635,8 @@ class MembersTablePage(BasePage):
         dlg = EditMemberDialog(self.store, self)
         if dlg.exec() == QDialog.Accepted:
             self.refresh()
+            if hasattr(self.window(), "refresh_background_views"):
+                self.window().refresh_background_views()
 
     def open_context_menu(self, position) -> None:
         item = self.table.itemAt(position)
@@ -3593,6 +3663,8 @@ class MembersTablePage(BasePage):
             dlg = EditMemberDialog(self.store, self, member)
             if dlg.exec() == QDialog.Accepted:
                 self.refresh()
+                if hasattr(self.window(), "refresh_background_views"):
+                    self.window().refresh_background_views()
 
     def delete_member(self, row: int) -> None:
         id_item = self.table.item(row, 0)
@@ -4364,6 +4436,7 @@ class MemberDetailsPage(BasePage):
                 QMessageBox.warning(self, "فشل حذف البصمة", f"DELETE FAILED: {error}")
                 return
             self.member["fingerprint_id"] = ""
+            self.member["updated_at"] = now_str()
             self.store.save_members(push_to_esp=False)
             start_members_sync(self, self.store, "تم حذف البصمة بنجاح.")
             self.set_member(self.member)
@@ -4383,6 +4456,8 @@ class MemberDetailsPage(BasePage):
                 member_id = self.member.get("member_id")
                 self.member = next((m for m in self.store.members if m.get("member_id") == member_id), self.member)
                 self.set_member(self.member)
+                if hasattr(self.window(), "refresh_background_views"):
+                    self.window().refresh_background_views()
                 debug_log("MemberDetailsPage.edit_member:refresh-after-accept-done")
         except Exception as exc:
             debug_log(f"MemberDetailsPage.edit_member:unhandled-error {exc}")
@@ -5271,7 +5346,7 @@ class PaymentsPage(BasePage):
 
     def refresh(self) -> None:
         rows = self.store.filtered_payments(self.search.text() if hasattr(self, "search") else "")
-        rows = sorted(rows, key=lambda p: str(p.get("created_at", "")), reverse=True)
+        rows = sorted(rows, key=payment_sort_key, reverse=True)
         self.count_lbl.setText(f"{len(rows)} دفعة")
         headers = ["الفاتورة", "نوع العملية", "الاسم", "الموبايل", "الاشتراك", "المبلغ", "متبقي", "الدفع", "البداية", "النهاية", "الحالة"]
         self.table.setColumnCount(len(headers))
@@ -7020,6 +7095,8 @@ class EditMemberDialog(QDialog):
             debug_log(f"EditMemberDialog._save_impl:editing member_id={self.member.get('member_id', '')}")
 
             # Update existing member
+            edit_ts = now_str()
+            self.member["updated_at"] = edit_ts
             original_paid = float(self.member.get("current_paid", 0) or 0)
             original_total = float(self.member.get("total_paid", 0) or 0)
             self.member["name"] = name
@@ -7074,6 +7151,7 @@ class EditMemberDialog(QDialog):
                             payment["name"] = name
                             payment["mobile"] = normalize_mobile(self.mobile.text().strip())
                             payment["gender"] = gender
+                            payment["updated_at"] = edit_ts
                             self.store.save_payments()
                             last_hist["subscription_start"] = new_start
                             last_hist["subscription_end"] = new_end
@@ -7121,6 +7199,7 @@ class EditMemberDialog(QDialog):
                 if ans != QMessageBox.Yes:
                     return
             # Add new member.
+            new_member_ts = now_str()
             member_id = f"member_{int(time.time() * 1000)}"
             new_member = {
                 "member_id": member_id,
@@ -7135,8 +7214,12 @@ class EditMemberDialog(QDialog):
                 "last_subscription_type": "",
                 "last_subscription_start": "",
                 "last_subscription_end": "",
+                "last_payment_date": "",
                 "follow_up_date": "",
                 "notes": "",
+                "fingerprint_id": "",
+                "created_at": new_member_ts,
+                "updated_at": new_member_ts,
             }
             self.store.members.append(new_member)
             self.store.save_members()
@@ -7327,6 +7410,7 @@ class AddFollowUpDialog(QDialog):
             if ans != QMessageBox.Yes:
                 return
 
+        fu_ts = now_str()
         member_id = f"member_{int(time.time() * 1000)}"
         new_member = {
             "member_id": member_id,
@@ -7341,8 +7425,12 @@ class AddFollowUpDialog(QDialog):
             "last_subscription_type": "",
             "last_subscription_start": "",
             "last_subscription_end": "",
+            "last_payment_date": "",
             "follow_up_date": str(self.follow_up.date()),
             "notes": self.notes.text().strip(),
+            "fingerprint_id": "",
+            "created_at": fu_ts,
+            "updated_at": fu_ts,
         }
         self.store.members.append(new_member)
         self.store.save_members()
@@ -8028,6 +8116,7 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
             store.esp_connected = True
             store.esp_status_checked_at = time.monotonic()
             member["fingerprint_id"] = fingerprint_id
+            member["updated_at"] = now_str()
             store.save_members(push_to_esp=False)
             start_members_sync(parent, store, f"تم تسجيل البصمة بنجاح. الرقم: {member['fingerprint_id']}")
             return

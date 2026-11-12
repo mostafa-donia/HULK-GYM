@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app import Store, date_to_str
+from app import Store, date_to_str, member_sort_key, payment_sort_key
 
 
 class TestReportingAndDeduplication(unittest.TestCase):
@@ -225,6 +225,60 @@ class TestReportingAndDeduplication(unittest.TestCase):
         self.assertIn("unrenewed_from_last_month", insights)
         self.assertIn("recommendations", insights)
         self.assertIsInstance(insights["recommendations"], list)
+
+
+    def test_member_sorting_by_newest_activity_and_renewal(self):
+        """Members page sorting should place newly renewed/updated members at the very top."""
+        m_old = {
+            "member_id": "MEM-00001",
+            "name": "قديم",
+            "last_subscription_start": "2026-06-01",
+            "last_payment_date": "2026-06-01 10:00:00",
+            "updated_at": "2026-06-01 10:00:00",
+        }
+        m_none = {
+            "member_id": "MEM-00002",
+            "name": "بدون تاريخ",
+            "last_payment_date": None,
+            "updated_at": None,
+        }
+        m_renewed_today = {
+            "member_id": "MEM-00003",
+            "name": "جدد اليوم",
+            "last_subscription_start": "2026-11-12",
+            "last_payment_date": "2026-11-12 11:30:00",
+            "updated_at": "2026-11-12 11:30:00",
+        }
+        m_updated_today = {
+            "member_id": "MEM-00004",
+            "name": "تحديث اليوم",
+            "last_subscription_start": "2026-10-01",
+            "last_payment_date": "2026-10-01 09:00:00",
+            "updated_at": "2026-11-12 12:00:00",
+        }
+
+        members = [m_old, m_none, m_renewed_today, m_updated_today]
+        sorted_members = sorted(members, key=member_sort_key, reverse=True)
+
+        # Most recently updated (12:00:00) is first
+        self.assertEqual(sorted_members[0]["member_id"], "MEM-00004")
+        # Renewed today (11:30:00) is second
+        self.assertEqual(sorted_members[1]["member_id"], "MEM-00003")
+        # Old member is third
+        self.assertEqual(sorted_members[2]["member_id"], "MEM-00001")
+        # Member with None is at the bottom, NEVER at the top
+        self.assertEqual(sorted_members[3]["member_id"], "MEM-00002")
+
+    def test_payment_sorting_by_newest(self):
+        """Payments page sorting should place newest payment at the top."""
+        p1 = {"invoice_no": "INV-00001", "created_at": "2026-07-01 10:00:00"}
+        p2 = {"invoice_no": "INV-00002", "created_at": "2026-11-12 11:30:00"}
+        p3 = {"invoice_no": "INV-00003", "created_at": None}
+        payments = [p1, p2, p3]
+        sorted_payments = sorted(payments, key=payment_sort_key, reverse=True)
+        self.assertEqual(sorted_payments[0]["invoice_no"], "INV-00002")
+        self.assertEqual(sorted_payments[1]["invoice_no"], "INV-00001")
+        self.assertEqual(sorted_payments[2]["invoice_no"], "INV-00003")
 
 
 if __name__ == "__main__":
