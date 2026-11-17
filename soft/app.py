@@ -783,6 +783,7 @@ def default_settings() -> Dict[str, Any]:
         "whatsapp_enabled": True,
         "whatsapp_send_mode": "typing",
         "whatsapp_letter_delay": 0.02,
+        "whatsapp_hourly_order": "newest",
     }
 
 
@@ -1279,6 +1280,9 @@ class Store:
         if "whatsapp_letter_delay" not in self.settings:
             self.settings["whatsapp_letter_delay"] = defaults["whatsapp_letter_delay"]
             changed = True
+        if "whatsapp_hourly_order" not in self.settings:
+            self.settings["whatsapp_hourly_order"] = defaults.get("whatsapp_hourly_order", "newest")
+            changed = True
 
         try:
             port_val = int(self.settings.get("esp_port", 80) or 80)
@@ -1420,6 +1424,30 @@ class Store:
         removed = 0
         for msg in self.whatsapp_messages:
             if str(msg.get("status", "")) in ("pending", "scheduled", "failed") and str(msg.get("mobile", "")) == mobile and str(msg.get("type", "")) in ("reminder_1", "reminder_3", "expired"):
+                removed += 1
+                continue
+            keep.append(msg)
+        if removed:
+            self.whatsapp_messages = keep
+            self.save_whatsapp()
+        return removed
+
+    def delete_all_reminders(self) -> int:
+        """Delete all reminder messages from the queue. Returns count deleted."""
+        keep: List[Dict[str, Any]] = []
+        removed = 0
+        for msg in self.whatsapp_messages:
+            msg_type = str(msg.get("type", "")).strip().lower()
+            m_type = str(msg.get("message_type", "")).strip().lower()
+            topic = str(msg.get("topic", "")).strip().lower()
+            tpl_key = str(msg.get("template_key", "")).strip().lower()
+            is_reminder = (
+                m_type == "reminder"
+                or msg_type in ("reminder_1", "reminder_3", "expired")
+                or topic.startswith("reminder")
+                or tpl_key.startswith("reminder")
+            )
+            if is_reminder:
                 removed += 1
                 continue
             keep.append(msg)
@@ -1806,6 +1834,54 @@ class Store:
         permissions_path = DATA_DIR / "member_permission.json"
         write_json(permissions_path, permissions_data)
         return permissions_path
+
+    def find_oldest_expired_member_with_fingerprint(self) -> Optional[Dict[str, Any]]:
+        """Find the member who is expired (did not renew) and has a fingerprint,
+        ordered so the oldest expired member comes first (earliest last_subscription_end)."""
+        candidates: List[Tuple[date, str, Dict[str, Any]]] = []
+        for m in self.members:
+            fp_id = str(m.get("fingerprint_id", "")).strip()
+            if not fp_id or fp_id in ("0", "None", "-1"):
+                continue
+            if str(m.get("current_status", "expired")) != "expired":
+                continue
+            end_raw = str(m.get("last_subscription_end", "")).strip()
+            end_dt = date.min
+            if end_raw:
+                try:
+                    end_dt = parse_date(end_raw)
+                except Exception:
+                    end_dt = date.min
+            start_raw = str(m.get("last_subscription_start", "")).strip() or str(m.get("created_at", "")).strip()
+            candidates.append((end_dt, start_raw, m))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return candidates[0][2]
+
+    def evict_oldest_expired_fingerprint(self) -> Optional[Dict[str, Any]]:
+        """Evict the oldest expired member's fingerprint to free up a slot in ESP/R307.
+        Returns the evicted member dict, or None if no expired member has a fingerprint."""
+        victim = self.find_oldest_expired_member_with_fingerprint()
+        if victim is None:
+            return None
+        fp_id_raw = victim.get("fingerprint_id")
+        try:
+            fp_id = int(fp_id_raw)
+        except (TypeError, ValueError):
+            victim["fingerprint_id"] = ""
+            self.save_members(push_to_esp=False)
+            return victim
+        debug_log(f"evict_oldest_expired_fingerprint: evicting member {victim.get('member_id')} fp_id={fp_id}")
+        try:
+            del_res = esp_client.delete_fingerprint(self.settings, fp_id)
+            debug_log(f"evict_oldest_expired_fingerprint: ESP delete result={del_res}")
+        except Exception as exc:
+            debug_log(f"evict_oldest_expired_fingerprint: ESP delete exception={exc}")
+        victim["fingerprint_id"] = ""
+        victim["updated_at"] = now_str()
+        self.save_members(push_to_esp=False)
+        return victim
 
     def esp_members_payload(self) -> Dict[str, Any]:
         """Build the minimal {member_id: {fingerprint_id, allowed}} payload for POST /members.
@@ -5874,14 +5950,21 @@ class SettingsPage(BasePage):
         whatsapp_layout.addWidget(make_label("الفاصل بين الحروف", "fieldLabel"), 4, 1)
         whatsapp_layout.addWidget(self.whatsapp_letter_delay, 4, 0)
 
+        self.whatsapp_hourly_order = QComboBox()
+        self.whatsapp_hourly_order.addItem("أحدث 10 رسائل", "newest")
+        self.whatsapp_hourly_order.addItem("أقدم 10 رسائل", "oldest")
+        self.whatsapp_hourly_order.setFixedHeight(28)
+        whatsapp_layout.addWidget(make_label("إرسال كل ساعة (الترتيب)", "fieldLabel"), 5, 1)
+        whatsapp_layout.addWidget(self.whatsapp_hourly_order, 5, 0)
+
         self.expired_message_template = QTextEdit()
         self.expired_message_template.setObjectName("searchInput")
         self.expired_message_template.setPlaceholderText("اكتب هنا نص رسالة غير المشتركين. استخدم {name} و {end_date} في النص.")
         self.expired_message_template.setMinimumHeight(120)
-        whatsapp_layout.addWidget(make_label("نص رسالة غير المشتركين", "fieldLabel"), 5, 1)
-        whatsapp_layout.addWidget(self.expired_message_template, 5, 0)
+        whatsapp_layout.addWidget(make_label("نص رسالة غير المشتركين", "fieldLabel"), 6, 1)
+        whatsapp_layout.addWidget(self.expired_message_template, 6, 0)
 
-        whatsapp_layout.addWidget(make_label("التقرير اليومي يتجهز تلقائيًا في الوقت المحدد ويروح لرقم المدير.", "smallMuted"), 6, 0, 1, 2)
+        whatsapp_layout.addWidget(make_label("التقرير اليومي يتجهز تلقائيًا في الوقت المحدد ويروح لرقم المدير.", "smallMuted"), 7, 0, 1, 2)
         self.scroll_layout.addWidget(whatsapp_box)
 
         self.scroll_layout.addWidget(make_label("معايرة شريط البحث في واتساب", "sectionTitle"))
@@ -6057,7 +6140,7 @@ class SettingsPage(BasePage):
             self.confirm_password.clear()
 
     def set_settings_controls_enabled(self, enabled: bool) -> None:
-        for attr in ("manager_mobile", "daily_report_time", "whatsapp_enabled_toggle", "whatsapp_send_mode", "whatsapp_letter_delay", "message_bank_tabs", "update_message_bank_btn", "plans_table", "methods", "expense_categories", "save_settings_btn", "sync_contacts_btn", "force_sync_contacts_btn", "add_plan_btn", "delete_selected_btn", "search_bar_x", "search_bar_y", "test_calibration_btn", "esp_ip", "esp_port", "esp_enabled_toggle"):
+        for attr in ("manager_mobile", "daily_report_time", "whatsapp_enabled_toggle", "whatsapp_send_mode", "whatsapp_letter_delay", "whatsapp_hourly_order", "message_bank_tabs", "update_message_bank_btn", "plans_table", "methods", "expense_categories", "save_settings_btn", "sync_contacts_btn", "force_sync_contacts_btn", "add_plan_btn", "delete_selected_btn", "search_bar_x", "search_bar_y", "test_calibration_btn", "esp_ip", "esp_port", "esp_enabled_toggle"):
             widget = getattr(self, attr, None)
             if widget is not None:
                 widget.setEnabled(enabled)
@@ -6222,6 +6305,12 @@ class SettingsPage(BasePage):
                     break
         if hasattr(self, "whatsapp_letter_delay"):
             self.whatsapp_letter_delay.setValue(float(self.store.settings.get("whatsapp_letter_delay", 0.02) or 0.02))
+        if hasattr(self, "whatsapp_hourly_order"):
+            hourly_order_val = str(self.store.settings.get("whatsapp_hourly_order", "newest")).strip().lower()
+            for idx in range(self.whatsapp_hourly_order.count()):
+                if self.whatsapp_hourly_order.itemData(idx) == hourly_order_val:
+                    self.whatsapp_hourly_order.setCurrentIndex(idx)
+                    break
         if hasattr(self, "expired_message_template"):
             self.expired_message_template.setPlainText(str(self.store.settings.get("expired_message_template", "")))
         if hasattr(self, "message_bank_topics"):
@@ -6311,6 +6400,8 @@ class SettingsPage(BasePage):
             self.store.settings["whatsapp_send_mode"] = str(self.whatsapp_send_mode.currentData() or "typing")
         if hasattr(self, "whatsapp_letter_delay"):
             self.store.settings["whatsapp_letter_delay"] = max(0.0, float(self.whatsapp_letter_delay.value()))
+        if hasattr(self, "whatsapp_hourly_order"):
+            self.store.settings["whatsapp_hourly_order"] = str(self.whatsapp_hourly_order.currentData() or "newest")
         if hasattr(self, "expired_message_template"):
             self.store.settings["expired_message_template"] = self.expired_message_template.toPlainText().strip()
         if hasattr(self, "search_bar_x"):
@@ -8047,6 +8138,29 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
             QMessageBox.warning(parent, "جهاز ESP غير متصل", "لا يمكن بدء تسجيل البصمة قبل تحديث حالة ESP والتأكد من اتصاله.")
         return
 
+    # Proactive eviction if capacity is reached (>= 1000 enrolled members with fingerprints)
+    enrolled_count = len([
+        m for m in store.members
+        if str(m.get("fingerprint_id", "")).strip() and str(m.get("fingerprint_id", "")).strip() not in ("0", "None", "-1")
+    ])
+    if enrolled_count >= 1000:
+        evicted = store.evict_oldest_expired_fingerprint()
+        if evicted:
+            evicted_name = str(evicted.get("name", "عضو منتهي")).strip()
+            debug_log(f"start_fingerprint_enrollment: reached capacity 1000. Evicted {evicted_name}")
+            QMessageBox.information(
+                parent,
+                "إخلاء مكان للبصمة",
+                f"تم بلوغ الحد الأقصى لبصمات الحساس (1000 بصمة).\nتم تلقائياً حذف بصمة أقدم عضو منتهي اشتراكه ({evicted_name}) لإتاحة مكان للعضو الجديد.",
+            )
+        else:
+            QMessageBox.warning(
+                parent,
+                "ذاكرة البصمة ممتلئة",
+                "ذاكرة جهاز البصمة ممتلئة بالكامل (1000 بصمة) وجميع الأعضاء مسجلون باشتراكات نشطة.\nلا يوجد أعضاء منتهية اشتراكاتهم لحذف بصمتهم تلقائياً.",
+            )
+            return
+
     store.esp_enrollment_active = True
     progress = QProgressDialog("تسجيل بصمة العضو:\nالخطوة [1/2]: ضع إصبعك بثبات على القارئ", "إلغاء", 0, 0, parent)
     progress.setWindowTitle("تسجيل بصمة عضو")
@@ -8089,6 +8203,7 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
         "second_scan_failed": "فشل التقاط صورة البصمة - يرجى الضغط بثبات",
         "template_mismatch": "تعذر مطابقة البصمة بعد عدة محاولات - يرجى إعادة المحاولة مع تنظيف الحساس",
         "save_failed": "فشل حفظ البصمة في ذاكرة الحساس",
+        "fingerprint_storage_full": "ذاكرة حساس البصمة ممتلئة (1000 بصمة)",
         "cancelled": "تم إلغاء التسجيل",
     }
 
@@ -8121,6 +8236,25 @@ def start_fingerprint_enrollment(parent: QWidget, store: Store, member: Dict[str
             start_members_sync(parent, store, f"تم تسجيل البصمة بنجاح. الرقم: {member['fingerprint_id']}")
             return
         error = result.get("error", result.get("error_detail", "enrollment_failed"))
+        if error == "fingerprint_storage_full":
+            evicted = store.evict_oldest_expired_fingerprint()
+            if evicted:
+                evicted_name = str(evicted.get("name", "عضو منتهي")).strip()
+                debug_log(f"start_fingerprint_enrollment: ESP reported full. Evicted {evicted_name} and retrying.")
+                QMessageBox.information(
+                    parent,
+                    "إخلاء مساحة وإعادة المحاولة",
+                    f"ذاكرة حساس البصمة كانت ممتلئة.\nتم حذف بصمة أقدم عضو منتهي اشتراكه ({evicted_name}).\nاضغط موافق لبدء التسجيل في المكان المتاح.",
+                )
+                start_fingerprint_enrollment(parent, store, member)
+                return
+            else:
+                QMessageBox.warning(
+                    parent,
+                    "ذاكرة البصمة ممتلئة",
+                    "ذاكرة حساس البصمة ممتلئة (1000 بصمة) ولا توجد بصمات لأعضاء منتهية اشتراكاتهم لتفريغها.",
+                )
+                return
         if error == "enrollment_response_lost":
             QMessageBox.information(
                 parent,
@@ -8478,137 +8612,106 @@ class WhatsAppPage(BasePage):
 
         self.root.addLayout(controls)
 
-        # Prepare & Setup Group
-        setup_row = QHBoxLayout()
-        setup_row.setDirection(QBoxLayout.Direction.RightToLeft)
-        setup_row.setSpacing(8)
-        setup_row.setContentsMargins(0, 0, 0, 0)
+        # Row 1: Main operations (Send & Prepare)
+        row1 = QHBoxLayout()
+        row1.setDirection(QBoxLayout.Direction.RightToLeft)
+        row1.setSpacing(8)
+        row1.setContentsMargins(0, 0, 0, 0)
 
-        setup_label = make_label("تجهيز الرسائل:", "fieldLabel")
-        setup_label.setFont(QFont("Segoe UI", 8))
-        setup_row.addWidget(setup_label)
-
-        prepare_btn = QPushButton("تجهيز التذكيرات")
-        prepare_btn.setObjectName("secondaryButton")
-        prepare_btn.setFixedHeight(26)
-        prepare_btn.setFont(QFont("Segoe UI", 8))
-        prepare_btn.clicked.connect(self.prepare_reminders)
-        setup_row.addWidget(prepare_btn, 1)
-
-        expired_bulk_btn = QPushButton("إرسال غير المشتركين")
-        expired_bulk_btn.setObjectName("secondaryButton")
-        expired_bulk_btn.setFixedHeight(26)
-        expired_bulk_btn.setFont(QFont("Segoe UI", 8))
-        expired_bulk_btn.clicked.connect(self.send_expired_non_subscribers)
-        setup_row.addWidget(expired_bulk_btn, 1)
-
-        send_report_btn = QPushButton("تقرير المدير")
+        send_report_btn = QPushButton("إرسال تقرير مدير")
         send_report_btn.setObjectName("primaryButton")
-        send_report_btn.setFixedHeight(26)
-        send_report_btn.setFont(QFont("Segoe UI", 8))
+        send_report_btn.setFixedHeight(30)
+        send_report_btn.setFont(QFont("Segoe UI", 9, QFont.Bold))
         send_report_btn.clicked.connect(self.send_manager_report_now)
-        setup_row.addWidget(send_report_btn, 1)
+        row1.addWidget(send_report_btn, 1)
 
-        self.root.addLayout(setup_row)
-
-        # Send Group
-        send_row = QHBoxLayout()
-        send_row.setDirection(QBoxLayout.Direction.RightToLeft)
-        send_row.setSpacing(8)
-        send_row.setContentsMargins(0, 0, 0, 0)
-
-        send_label = make_label("إرسال:", "fieldLabel")
-        send_label.setFont(QFont("Segoe UI", 8))
-        send_row.addWidget(send_label)
-
-        send_unsent_btn = QPushButton("إرسال غير المرسل")
+        send_unsent_btn = QPushButton("إرسال غير مرسل")
         send_unsent_btn.setObjectName("primaryButton")
-        send_unsent_btn.setFixedHeight(26)
-        send_unsent_btn.setFont(QFont("Segoe UI", 8))
-        send_unsent_btn.setToolTip("إرسال كافة الرسائل غير المرسلة (المعلقة + الفاشلة)")
+        send_unsent_btn.setFixedHeight(30)
+        send_unsent_btn.setFont(QFont("Segoe UI", 9, QFont.Bold))
         send_unsent_btn.clicked.connect(self.send_unsent_messages)
-        send_row.addWidget(send_unsent_btn, 1)
+        row1.addWidget(send_unsent_btn, 1)
 
-        send_pending_btn = QPushButton("إرسال المعلق")
-        send_pending_btn.setObjectName("secondaryButton")
-        send_pending_btn.setFixedHeight(26)
-        send_pending_btn.setFont(QFont("Segoe UI", 8))
-        send_pending_btn.clicked.connect(self.select_and_send)
-        send_row.addWidget(send_pending_btn, 1)
+        expired_bulk_btn = QPushButton("إرسال غير مشتركين")
+        expired_bulk_btn.setObjectName("secondaryButton")
+        expired_bulk_btn.setFixedHeight(30)
+        expired_bulk_btn.setFont(QFont("Segoe UI", 9))
+        expired_bulk_btn.clicked.connect(self.send_expired_non_subscribers)
+        row1.addWidget(expired_bulk_btn, 1)
 
-        unsendable_report_btn = QPushButton("فحص أسباب عدم الإرسال")
-        unsendable_report_btn.setObjectName("secondaryButton")
-        unsendable_report_btn.setFixedHeight(26)
-        unsendable_report_btn.setFont(QFont("Segoe UI", 8))
-        unsendable_report_btn.setToolTip("بيان الرسائل التي لن يتم إرسالها وعددها وأسباب استبعادها بالتفصيل")
-        unsendable_report_btn.clicked.connect(self.show_unsendable_report)
-        send_row.addWidget(unsendable_report_btn, 1)
+        prepare_btn = QPushButton("تجهيز تذكيرات")
+        prepare_btn.setObjectName("secondaryButton")
+        prepare_btn.setFixedHeight(30)
+        prepare_btn.setFont(QFont("Segoe UI", 9))
+        prepare_btn.clicked.connect(self.prepare_reminders)
+        row1.addWidget(prepare_btn, 1)
 
         retry_failed_btn = QPushButton("إعادة الفاشل للمعلق")
         retry_failed_btn.setObjectName("secondaryButton")
-        retry_failed_btn.setFixedHeight(26)
-        retry_failed_btn.setFont(QFont("Segoe UI", 8))
+        retry_failed_btn.setFixedHeight(30)
+        retry_failed_btn.setFont(QFont("Segoe UI", 9))
         retry_failed_btn.clicked.connect(self.retry_failed)
-        send_row.addWidget(retry_failed_btn, 1)
+        row1.addWidget(retry_failed_btn, 1)
 
-        resend_selected_btn = QPushButton("إعادة إرسال المحدد")
-        resend_selected_btn.setObjectName("secondaryButton")
-        resend_selected_btn.setFixedHeight(26)
-        resend_selected_btn.setFont(QFont("Segoe UI", 8))
-        resend_selected_btn.clicked.connect(self.resend_selected)
-        send_row.addWidget(resend_selected_btn, 1)
+        self.root.addLayout(row1)
 
-        force_resend_btn = QPushButton("إرسال قسري (حتى لو أُرسلت)")
+        # Row 2: Selected message actions
+        row2 = QHBoxLayout()
+        row2.setDirection(QBoxLayout.Direction.RightToLeft)
+        row2.setSpacing(8)
+        row2.setContentsMargins(0, 4, 0, 0)
+
+        force_resend_btn = QPushButton("إرسال قسري للمحدد (فوري)")
         force_resend_btn.setObjectName("warningButton")
-        force_resend_btn.setFixedHeight(26)
-        force_resend_btn.setFont(QFont("Segoe UI", 8))
+        force_resend_btn.setFixedHeight(30)
+        force_resend_btn.setFont(QFont("Segoe UI", 9, QFont.Bold))
         force_resend_btn.clicked.connect(self.force_resend_selected)
-        send_row.addWidget(force_resend_btn, 1)
+        row2.addWidget(force_resend_btn, 1)
 
-        self.root.addLayout(send_row)
+        resend_selected_btn = QPushButton("إعادة إرسال محدد")
+        resend_selected_btn.setObjectName("secondaryButton")
+        resend_selected_btn.setFixedHeight(30)
+        resend_selected_btn.setFont(QFont("Segoe UI", 9))
+        resend_selected_btn.clicked.connect(self.resend_selected)
+        row2.addWidget(resend_selected_btn, 1)
 
-        # Delete Group
-        delete_row = QHBoxLayout()
-        delete_row.setDirection(QBoxLayout.Direction.RightToLeft)
-        delete_row.setSpacing(8)
-        delete_row.setContentsMargins(0, 0, 0, 0)
-
-        delete_label = make_label("حذف:", "fieldLabel")
-        delete_label.setFont(QFont("Segoe UI", 8))
-        delete_row.addWidget(delete_label)
-
-        delete_selected_btn = QPushButton("حذف المحدد")
+        delete_selected_btn = QPushButton("حذف محدد")
         delete_selected_btn.setObjectName("dangerButton")
-        delete_selected_btn.setFixedHeight(26)
-        delete_selected_btn.setFont(QFont("Segoe UI", 8))
+        delete_selected_btn.setFixedHeight(30)
+        delete_selected_btn.setFont(QFont("Segoe UI", 9))
         delete_selected_btn.clicked.connect(self.delete_selected)
-        delete_row.addWidget(delete_selected_btn, 1)
+        row2.addWidget(delete_selected_btn, 1)
 
-        # Delete dropdown menu
-        delete_menu_btn = QPushButton("حذف متقدم ▼")
-        delete_menu_btn.setObjectName("dangerButton")
-        delete_menu_btn.setFixedHeight(26)
-        delete_menu_btn.setFont(QFont("Segoe UI", 8))
-        delete_row.addWidget(delete_menu_btn, 1)
+        self.root.addLayout(row2)
 
-        delete_menu = QMenu(self)
-        delete_menu.setLayoutDirection(Qt.RightToLeft)
-        delete_menu.setFont(QFont("Segoe UI", 8))
-        
-        delete_sent_action = delete_menu.addAction("حذف المرسلة (تم)")
-        delete_sent_action.triggered.connect(self.delete_sent_messages)
-        
-        delete_failed_action = delete_menu.addAction("حذف الفاشلة")
-        delete_failed_action.triggered.connect(self.delete_failed_messages)
-        
-        delete_menu.addSeparator()
-        
-        delete_all_action = delete_menu.addAction("حذف الكل")
-        delete_all_action.triggered.connect(self.delete_all_messages)
+        # Row 3: Bulk Delete Actions
+        row3 = QHBoxLayout()
+        row3.setDirection(QBoxLayout.Direction.RightToLeft)
+        row3.setSpacing(8)
+        row3.setContentsMargins(0, 4, 0, 0)
 
-        delete_menu_btn.setMenu(delete_menu)
+        delete_reminders_btn = QPushButton("حذف كل التذكيرات")
+        delete_reminders_btn.setObjectName("dangerButton")
+        delete_reminders_btn.setFixedHeight(30)
+        delete_reminders_btn.setFont(QFont("Segoe UI", 9))
+        delete_reminders_btn.clicked.connect(self.delete_all_reminders)
+        row3.addWidget(delete_reminders_btn, 1)
 
-        self.root.addLayout(delete_row)
+        delete_sent_btn = QPushButton("حذف كل الرسائل التي تم إرسالها")
+        delete_sent_btn.setObjectName("dangerButton")
+        delete_sent_btn.setFixedHeight(30)
+        delete_sent_btn.setFont(QFont("Segoe UI", 9))
+        delete_sent_btn.clicked.connect(self.delete_sent_messages)
+        row3.addWidget(delete_sent_btn, 1)
+
+        delete_all_btn = QPushButton("حذف الكل")
+        delete_all_btn.setObjectName("dangerButton")
+        delete_all_btn.setFixedHeight(30)
+        delete_all_btn.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        delete_all_btn.clicked.connect(self.delete_all_messages)
+        row3.addWidget(delete_all_btn, 1)
+
+        self.root.addLayout(row3)
 
         self.count_lbl = make_label("0 رسالة", "muted")
         self.count_lbl.setFont(QFont("Segoe UI", 10))
@@ -9427,34 +9530,59 @@ class WhatsAppPage(BasePage):
         QMessageBox.information(self, "تم", f"تم تجهيز {count} رسالة جديدة في المعلق لإعادة الإرسال.")
         self.refresh()
 
+    def delete_all_reminders(self) -> None:
+        """Delete all reminder messages from the system after confirmation."""
+        reminders = [
+            m for m in self.store.whatsapp_messages
+            if str(m.get("message_type", "")).strip().lower() == "reminder"
+            or str(m.get("type", "")).strip().lower() in ("reminder_1", "reminder_3", "expired")
+            or str(m.get("topic", "")).strip().lower().startswith("reminder")
+            or str(m.get("template_key", "")).strip().lower().startswith("reminder")
+        ]
+        if not reminders:
+            QMessageBox.information(self, "تنبيه", "لا توجد رسائل تذكيرات لحذفها.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "تأكيد حذف التذكيرات",
+            f"هل تريد حذف جميع رسائل التذكيرات في النظام؟\nعدد رسائل التذكيرات: {len(reminders)}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        removed = self.store.delete_all_reminders()
+        QMessageBox.information(self, "تم", f"تم حذف {removed} رسالة تذكير بنجاح.")
+        self.refresh()
+
     def force_resend_selected(self) -> None:
-        """Force resend selected messages even if they were already sent."""
+        """Force resend selected messages immediately without just parking them in pending."""
         ids = self.selected_message_ids()
         if not ids:
             QMessageBox.warning(self, "تنبيه", "اختار رسالة واحدة أو أكثر من الجدول الأول.")
             return
         reply = QMessageBox.question(
             self,
-            "تأكيد الإرسال القسري",
-            f"هل تريد إعادة إرسال {len(ids)} رسالة حتى لو كانت مُرسلة بالفعل؟",
+            "تأكيد الإرسال القسري الفوري",
+            f"هل تريد إرسال {len(ids)} رسالة محددة فوراً عبر واتساب حتى لو كانت مُرسلة بالفعل؟",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
-        # Reset status to pending for force resend
-        count = 0
+        target_messages: List[Dict[str, Any]] = []
         for msg_id in ids:
             for msg in self.store.whatsapp_messages:
                 if str(msg.get("message_id", "")) == msg_id:
                     msg["status"] = "pending"
                     msg["sent_at"] = ""
                     msg["error"] = ""
-                    count += 1
+                    target_messages.append(msg)
                     break
         self.store.save_whatsapp()
-        QMessageBox.information(self, "تم", f"تم تحضير {count} رسالة لإعادة الإرسال القسري.")
         self.refresh()
+        if target_messages:
+            self.send_pending_callback(messages=target_messages)
 
     def refresh(self) -> None:
         status_filter = self.status_filter.currentData() if hasattr(self, "status_filter") else "all"
@@ -10359,26 +10487,36 @@ class MainWindow(QMainWindow):
             return
 
         self.last_whatsapp_hourly_prompt_key = hour_key
-        sorted_target = sorted(
-            target_messages,
-            key=lambda m: (
-                str(m.get("created_at", "")),
-                str(m.get("message_id", "")),
-            ),
-            reverse=True,
-        )
-        send_count = min(10, len(sorted_target))
+        current_order = str(self.store.settings.get("whatsapp_hourly_order", "newest")).strip().lower()
+        if current_order not in ("newest", "oldest"):
+            current_order = "newest"
+
+        send_count = min(10, len(target_messages))
         total_pending = len(pending)
         total_scheduled = len([m for m in self.store.whatsapp_messages if str(m.get("status", "")) == "scheduled"])
 
-        should_send = self.show_pending_whatsapp_summary_dialog(
+        should_send, chosen_order = self.show_pending_whatsapp_summary_dialog(
             today_count=len(today_pending),
             yesterday_count=len(yesterday_pending),
             total_ready=total_pending,
             total_scheduled=total_scheduled,
             send_count=send_count,
+            current_order=current_order,
         )
         if should_send:
+            if chosen_order != self.store.settings.get("whatsapp_hourly_order"):
+                self.store.settings["whatsapp_hourly_order"] = chosen_order
+                self.store.save_settings()
+
+            is_newest = chosen_order == "newest"
+            sorted_target = sorted(
+                target_messages,
+                key=lambda m: (
+                    str(m.get("created_at", "")),
+                    str(m.get("message_id", "")),
+                ),
+                reverse=is_newest,
+            )
             self.send_pending_whatsapp(silent=False, messages=sorted_target[:send_count])
 
     def show_pending_whatsapp_summary_dialog(
@@ -10388,7 +10526,8 @@ class MainWindow(QMainWindow):
         total_ready: int,
         total_scheduled: int,
         send_count: int,
-    ) -> bool:
+        current_order: str = "newest",
+    ) -> Tuple[bool, str]:
         dialog = QDialog(self)
         dialog.setWindowTitle("رسائل واتساب المعلقة")
         dialog.setLayoutDirection(Qt.RightToLeft)
@@ -10397,12 +10536,12 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(22, 22, 22, 20)
         root.setSpacing(16)
 
-        title_label = make_label("ملخص الرسائل المعلقة", "dialogTitleSmall")
+        title_label = make_label("ملخص رسائل واتساب كل ساعة", "dialogTitleSmall")
         title_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         root.addWidget(title_label)
 
         subtitle = make_label(
-            "يعرض هذا التنبيه رسائل اليوم وأمس فقط لقرار إرسال أسرع.",
+            "يعرض هذا التنبيه رسائل اليوم وأمس فقط. يمكنك اختيار إرسال أحدث 10 أو أقدم 10 رسائل.",
             "smallMuted",
         )
         subtitle.setWordWrap(True)
@@ -10412,12 +10551,30 @@ class MainWindow(QMainWindow):
         summary_box.setObjectName("settingsBox")
         summary_layout = QVBoxLayout(summary_box)
         summary_layout.setContentsMargins(16, 16, 16, 16)
-        summary_layout.setSpacing(12)
+        summary_layout.setSpacing(10)
         summary_layout.addWidget(make_label(f"رسائل اليوم: {today_count}", "muted"))
         summary_layout.addWidget(make_label(f"رسائل أمس: {yesterday_count}", "muted"))
         summary_layout.addWidget(make_label(f"إجمالي الرسائل الجاهزة الآن: {total_ready}", "muted"))
         summary_layout.addWidget(make_label(f"رسائل قيد الانتظار (scheduled): {total_scheduled}", "muted"))
         summary_layout.addWidget(make_label(f"سيتم إرسال: {send_count} رسالة", "muted"))
+
+        order_row = QHBoxLayout()
+        order_row.setDirection(QBoxLayout.Direction.RightToLeft)
+        order_row.setSpacing(8)
+        order_lbl = make_label("ترتيب الإرسال:", "fieldLabel")
+        order_row.addWidget(order_lbl)
+
+        order_combo = QComboBox()
+        order_combo.addItem("أحدث 10 رسائل (الأحدث أولاً)", "newest")
+        order_combo.addItem("أقدم 10 رسائل (الأقدم أولاً)", "oldest")
+        order_combo.setFixedHeight(30)
+        if current_order == "oldest":
+            order_combo.setCurrentIndex(1)
+        else:
+            order_combo.setCurrentIndex(0)
+        order_row.addWidget(order_combo, 1)
+        summary_layout.addLayout(order_row)
+
         root.addWidget(summary_box)
 
         buttons = QHBoxLayout()
@@ -10436,18 +10593,19 @@ class MainWindow(QMainWindow):
         buttons.addStretch(1)
         root.addLayout(buttons)
 
-        choice: Dict[str, bool] = {"send": False}
+        choice: Dict[str, Any] = {"send": False, "order": current_order}
 
         def choose_send() -> None:
             choice["send"] = True
+            choice["order"] = str(order_combo.currentData() or "newest")
             dialog.accept()
 
         send_btn.clicked.connect(choose_send)
         postpone_btn.clicked.connect(dialog.reject)
 
-        fit_dialog_to_screen(dialog, 860, 360)
+        fit_dialog_to_screen(dialog, 860, 420)
         dialog.exec()
-        return bool(choice["send"])
+        return bool(choice["send"]), str(choice.get("order", "newest"))
 
     def prompt_whatsapp_send_options(self, pending: List[Dict[str, Any]]) -> None:
         def created_at_datetime(message: Dict[str, Any]) -> Optional[datetime]:

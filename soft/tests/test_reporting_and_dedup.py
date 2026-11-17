@@ -280,6 +280,96 @@ class TestReportingAndDeduplication(unittest.TestCase):
         self.assertEqual(sorted_payments[1]["invoice_no"], "INV-00001")
         self.assertEqual(sorted_payments[2]["invoice_no"], "INV-00003")
 
+    def test_evict_oldest_expired_fingerprint(self):
+        """When fingerprint limit is reached, system should find and evict the oldest expired member."""
+        m_active = {
+            "member_id": "MEM-00001",
+            "name": "عضو نشط",
+            "current_status": "active",
+            "fingerprint_id": 101,
+            "last_subscription_end": "2026-12-01",
+        }
+        m_expired_recent = {
+            "member_id": "MEM-00002",
+            "name": "منتهي حديثاً",
+            "current_status": "expired",
+            "fingerprint_id": 102,
+            "last_subscription_end": "2026-10-15",
+        }
+        m_expired_oldest = {
+            "member_id": "MEM-00003",
+            "name": "أقدم منتهي",
+            "current_status": "expired",
+            "fingerprint_id": 103,
+            "last_subscription_end": "2026-01-10",
+        }
+        m_expired_no_fp = {
+            "member_id": "MEM-00004",
+            "name": "منتهي بدون بصمة",
+            "current_status": "expired",
+            "fingerprint_id": None,
+            "last_subscription_end": "2025-01-01",
+        }
+        self.store.members = [m_active, m_expired_recent, m_expired_oldest, m_expired_no_fp]
+        
+        # Test finding oldest expired
+        oldest = self.store.find_oldest_expired_member_with_fingerprint()
+        self.assertIsNotNone(oldest)
+        self.assertEqual(oldest["member_id"], "MEM-00003")
+        self.assertEqual(oldest["fingerprint_id"], 103)
+
+        # Track esp command
+        from unittest.mock import patch
+        with patch("app.esp_client.delete_fingerprint", return_value={"success": True}) as mock_del:
+            # Test eviction
+            evicted = self.store.evict_oldest_expired_fingerprint()
+            self.assertIsNotNone(evicted)
+            self.assertEqual(evicted["member_id"], "MEM-00003")
+            self.assertIn(m_expired_oldest.get("fingerprint_id"), (None, ""))
+            mock_del.assert_called_once_with(self.store.settings, 103)
+
+        # Next oldest should now be m_expired_recent (102)
+        next_oldest = self.store.find_oldest_expired_member_with_fingerprint()
+        self.assertEqual(next_oldest["member_id"], "MEM-00002")
+
+    def test_hourly_whatsapp_order_selection(self):
+        """Hourly WhatsApp batch selection should correctly pick newest 10 vs oldest 10."""
+        msgs = []
+        for i in range(25):
+            msgs.append({
+                "message_id": f"MSG-{i:03d}",
+                "status": "pending",
+                "created_at": f"2026-11-17 10:{i:02d}:00",
+            })
+        
+        # Newest 10: slice [-10:] reversed (MSG-024 down to MSG-015)
+        newest_10 = list(reversed(msgs[-10:]))
+        self.assertEqual(len(newest_10), 10)
+        self.assertEqual(newest_10[0]["message_id"], "MSG-024")
+        self.assertEqual(newest_10[-1]["message_id"], "MSG-015")
+
+        # Oldest 10: slice [:10] (MSG-000 up to MSG-009)
+        oldest_10 = msgs[:10]
+        self.assertEqual(len(oldest_10), 10)
+        self.assertEqual(oldest_10[0]["message_id"], "MSG-000")
+        self.assertEqual(oldest_10[-1]["message_id"], "MSG-009")
+
+    def test_delete_all_reminders(self):
+        """Store.delete_all_reminders should delete only reminders while keeping other messages intact."""
+        m1 = {"message_id": "M1", "template_key": "reminder_3days", "status": "pending"}
+        m2 = {"message_id": "M2", "template_key": "reminder_expired", "status": "sent"}
+        m3 = {"message_id": "M3", "template_key": "receipt", "status": "pending"}
+        m4 = {"message_id": "M4", "type": "manager_report", "status": "sent"}
+        self.store.whatsapp_messages = [m1, m2, m3, m4]
+
+        deleted_count = self.store.delete_all_reminders()
+        self.assertEqual(deleted_count, 2)
+        remaining_ids = [m["message_id"] for m in self.store.whatsapp_messages]
+        self.assertNotIn("M1", remaining_ids)
+        self.assertNotIn("M2", remaining_ids)
+        self.assertIn("M3", remaining_ids)
+        self.assertIn("M4", remaining_ids)
+
 
 if __name__ == "__main__":
     unittest.main()
