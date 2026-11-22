@@ -355,17 +355,50 @@ def prepare_messages(messages:str):
     message_list = message_list.split(",")
     return message_list
 
+def ensure_whatsapp_window_fullscreen_and_zoom():
+    """Ensure Chrome WhatsApp Web window is maximized (full screen) and zoom is forced to 100%."""
+    try:
+        chrome_windows = [w for w in getAllWindows() if "Chrome" in w.title]
+        if chrome_windows:
+            chrome = chrome_windows[0]
+            if chrome.isMinimized:
+                chrome.restore()
+            chrome.activate()
+            sleep(0.3)
+            try:
+                chrome.maximize()
+            except Exception:
+                pass
+            try:
+                import win32gui, win32con
+                hwnd = getattr(chrome, "_hWnd", None) or win32gui.GetForegroundWindow()
+                if hwnd:
+                    win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
+            except Exception:
+                pass
+    except Exception as exc:
+        print(f"[ensure_whatsapp_window_fullscreen_and_zoom] Maximize error: {exc}")
+
+    try:
+        sleep(0.2)
+        hotkey("ctrl", "0")
+        sleep(0.1)
+    except Exception as exc:
+        print(f"[ensure_whatsapp_window_fullscreen_and_zoom] Zoom reset error: {exc}")
+
+
 def whatsupp_ready():
     chrome_windows = [w for w in getAllWindows() if "Chrome" in w.title]
     if not chrome_windows:
         print("here is 11")
         print("No Chrome windows found.")
-        Popen("start chrome https://web.whatsapp.com", shell=True)
+        Popen("start chrome --start-maximized https://web.whatsapp.com", shell=True)
         for _ in range(100):
             chrome_windows = [w for w in getAllWindows() if "Chrome" in w.title]
             for window in chrome_windows:
                 print(f"Found Chrome window: {window.title}")
             sleep(0.1)
+        ensure_whatsapp_window_fullscreen_and_zoom()
         for i in range(1000):
             #copy all
             hotkey("ctrl", "a")
@@ -389,6 +422,7 @@ def whatsupp_ready():
         if chrome.isMinimized:
             chrome.restore()
         chrome.activate()
+        ensure_whatsapp_window_fullscreen_and_zoom()
         sleep(1)    
     whats_tab_found = False
     for _ in range(20):
@@ -401,18 +435,20 @@ def whatsupp_ready():
         hotkey("ctrl", "tab")    
     if whats_tab_found:
         print("WhatsApp tab is active.")
+        ensure_whatsapp_window_fullscreen_and_zoom()
         #hotkey("ctrl", "alt", "/")    
         #hotkey("ctrl", "a")
         #press("delete")
 
     else:
         print("WhatsApp tab not found. Opening new one...")
-        Popen("start chrome https://web.whatsapp.com", shell=True)
+        Popen("start chrome --start-maximized https://web.whatsapp.com", shell=True)
         for _ in range(100):
             chrome_windows = [w for w in getAllWindows() if "Chrome" in w.title]
             for window in chrome_windows:
                 print(f"Found Chrome window: {window.title}")
             sleep(0.1)
+        ensure_whatsapp_window_fullscreen_and_zoom()
         for i in range(1000):
             #copy all
             hotkey("ctrl", "a")

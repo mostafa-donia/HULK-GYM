@@ -649,16 +649,19 @@ def member_latest_activity_timestamp(m: Dict[str, Any]) -> str:
     c = norm_dt(m.get("last_payment_date"))
     if c:
         candidates.append(c)
-    history = m.get("subscriptions_history")
-    if isinstance(history, list):
-        for sub in history:
-            if isinstance(sub, dict):
-                c = norm_dt(sub.get("created_at"))
-                if c:
-                    candidates.append(c)
-                c = norm_dt(sub.get("subscription_start"))
-                if c:
-                    candidates.append(c)
+    if not candidates:
+        history = m.get("subscriptions_history")
+        if isinstance(history, list) and history:
+            for sub in reversed(history):
+                if isinstance(sub, dict):
+                    c = norm_dt(sub.get("created_at"))
+                    if c:
+                        candidates.append(c)
+                    c = norm_dt(sub.get("subscription_start"))
+                    if c:
+                        candidates.append(c)
+                    if candidates:
+                        break
     c = norm_dt(m.get("last_subscription_start"))
     if c:
         candidates.append(c)
@@ -2440,7 +2443,7 @@ class Store:
             self.save_members()
 
     def filtered_members(self, page_filter: str, gender_filter: str = "all", query: str = "") -> List[Dict[str, Any]]:
-        self.refresh_statuses(save=True)
+        self.refresh_statuses(save=False)
         rows = list(self.members)
         if page_filter == "active":
             rows = [m for m in rows if m.get("current_status") == "active"]
@@ -3357,10 +3360,11 @@ def configure_table(table: QTableWidget) -> None:
     table.setSelectionBehavior(QAbstractItemView.SelectRows)
     table.setEditTriggers(QAbstractItemView.NoEditTriggers)
     table.verticalHeader().setVisible(False)
+    table.verticalHeader().setDefaultSectionSize(34)
     table.horizontalHeader().setStretchLastSection(False)
     table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-    table.setWordWrap(True)
-    table.setTextElideMode(Qt.ElideNone)
+    table.setWordWrap(False)
+    table.setTextElideMode(Qt.ElideRight)
     table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
     table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
     table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -3605,7 +3609,11 @@ class MembersTablePage(BasePage):
         self.search.setObjectName("searchInput")
         self.search.setFont(QFont("Segoe UI", 11))
         self.search.setFixedHeight(34)
-        self.search.textChanged.connect(self.refresh)
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(180)
+        self.search_timer.timeout.connect(self.refresh)
+        self.search.textChanged.connect(self.search_timer.start)
         controls.addWidget(self.search, 1)
 
         self.gender_filter = QComboBox()
@@ -3704,7 +3712,6 @@ class MembersTablePage(BasePage):
                 if c in (4, 5):
                     cell.setForeground(Qt.GlobalColor.green)
                 self.table.setItem(r, c, cell)
-        self.table.resizeRowsToContents()
         self.table.setUpdatesEnabled(True)
 
     def open_add_member(self) -> None:
@@ -5408,7 +5415,11 @@ class PaymentsPage(BasePage):
         self.search = QLineEdit()
         self.search.setObjectName("searchInput")
         self.search.setPlaceholderText("ابحث برقم الفاتورة أو الاسم أو الموبايل أو طريقة الدفع...")
-        self.search.textChanged.connect(self.refresh)
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(180)
+        self.search_timer.timeout.connect(self.refresh)
+        self.search.textChanged.connect(self.search_timer.start)
         controls.addWidget(self.search, 1)
         self.count_lbl = make_label("0 دفعة", "muted")
         self.count_lbl.setFixedWidth(130)
@@ -5425,6 +5436,7 @@ class PaymentsPage(BasePage):
         rows = sorted(rows, key=payment_sort_key, reverse=True)
         self.count_lbl.setText(f"{len(rows)} دفعة")
         headers = ["الفاتورة", "نوع العملية", "الاسم", "الموبايل", "الاشتراك", "المبلغ", "متبقي", "الدفع", "البداية", "النهاية", "الحالة"]
+        self.table.setUpdatesEnabled(False)
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setRowCount(len(rows))
@@ -5452,7 +5464,7 @@ class PaymentsPage(BasePage):
         if self.table.columnCount() > 2:
             self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
             self.table.setColumnWidth(2, 260)
-        self.table.resizeRowsToContents()
+        self.table.setUpdatesEnabled(True)
 
 
 class UnifiedEntryPage(BasePage):
@@ -8582,7 +8594,11 @@ class WhatsAppPage(BasePage):
         self.search.setPlaceholderText("ابحث بالاسم أو الموبايل أو النوع أو الحالة...")
         self.search.setFont(QFont("Segoe UI", 9))
         self.search.setFixedHeight(26)
-        self.search.textChanged.connect(self.refresh)
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(180)
+        self.search_timer.timeout.connect(self.refresh)
+        self.search.textChanged.connect(self.search_timer.start)
         controls.addWidget(self.search, 1)
 
         # Message type filter
@@ -9620,13 +9636,14 @@ class WhatsAppPage(BasePage):
         self.table.setColumnWidth(6, 120)
         self.table.setColumnWidth(7, 120)
         self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
+        mobile_to_status = {
+            normalize_mobile(str(m.get("mobile", ""))): status_ar(str(m.get("current_status", "expired")))
+            for m in self.store.members if m.get("mobile")
+        }
         for r, msg in enumerate(rows):
             self._rows_by_index[r] = msg
-            member_status = "غير معروف"
             mobile = str(msg.get("mobile", ""))
-            member = next((m for m in self.store.members if normalize_mobile(str(m.get("mobile", ""))) == normalize_mobile(mobile)), None)
-            if member is not None:
-                member_status = status_ar(str(member.get("current_status", "expired")))
+            member_status = mobile_to_status.get(normalize_mobile(mobile), "غير معروف")
 
             values = [
                 msg.get("message_id", ""),
@@ -10442,7 +10459,8 @@ class MainWindow(QMainWindow):
         added_daily_report = self.store.queue_daily_report_if_due(force=False, save=True)
         added += added_daily_report
         promoted = self.store.promote_scheduled_whatsapp_messages(save=True)
-        self.refresh_background_views()
+        if added > 0 or promoted > 0 or removed_old > 0:
+            self.refresh_background_views()
         pending = self.store.pending_whatsapp_messages(ready_only=True)
         if promoted > 0:
             self.statusBar().showMessage(f"تم نقل {promoted} رسالة واتساب إلى المعلق بعد اكتمال ساعة الانتظار.", 6000)
@@ -10930,8 +10948,7 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def apply_styles(self) -> None:
-        self.setStyleSheet(
-            """
+        style_text = """
             * {
                 font-family: "Segoe UI", "Cairo", "Tahoma";
                 font-size: 15px;
@@ -11197,21 +11214,123 @@ class MainWindow(QMainWindow):
                 border-color: #FFE874;
                 color: #FFFFFF;
             }
-            QLineEdit#searchInput, QLineEdit, QComboBox, QDateEdit, QDoubleSpinBox {
-                background: #080F15;
+            /* Input fields: dark background with bright, readable text across all controls */
+            QLineEdit,
+            QTextEdit,
+            QPlainTextEdit,
+            QSpinBox,
+            QDoubleSpinBox,
+            QDateEdit,
+            QTimeEdit,
+            QDateTimeEdit,
+            QComboBox {
+                background-color: #080F15;
                 border: 1px solid #1A2833;
                 border-radius: 8px;
-                padding: 6px 8px;
+                padding: 6px 10px;
                 color: #EAF0F4;
-                min-height: 26px;
-                font-size: 13px;
+                min-height: 28px;
+                font-size: 14px;
+                selection-background-color: #244015;
+                selection-color: #A8F14B;
             }
-            QLineEdit#searchInput:focus, QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QDoubleSpinBox:focus {
-                border: 1px solid #5FAF1B;
+            QLineEdit:focus,
+            QTextEdit:focus,
+            QPlainTextEdit:focus,
+            QSpinBox:focus,
+            QDoubleSpinBox:focus,
+            QDateEdit:focus,
+            QTimeEdit:focus,
+            QDateTimeEdit:focus,
+            QComboBox:focus {
+                border: 1px solid #7ED321;
+                background-color: #0B171E;
             }
-            QComboBox::drop-down, QDateEdit::drop-down, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+            QLineEdit:disabled,
+            QTextEdit:disabled,
+            QPlainTextEdit:disabled,
+            QSpinBox:disabled,
+            QDoubleSpinBox:disabled,
+            QDateEdit:disabled,
+            QComboBox:disabled {
+                background-color: #050B10;
+                color: #5A6975;
+                border: 1px solid #101B24;
+            }
+            /* Editable combobox inner input */
+            QComboBox:editable {
+                background-color: #080F15;
+                color: #EAF0F4;
+            }
+            QComboBox QLineEdit {
+                background-color: #080F15;
+                color: #EAF0F4;
                 border: none;
-                width: 30px;
+                padding: 0px;
+            }
+            /* Combobox drop-down arrow container */
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top left;
+                width: 28px;
+                border-left: 1px solid #1A2833;
+                border-top-left-radius: 8px;
+                border-bottom-left-radius: 8px;
+                background-color: #0B141B;
+            }
+            QComboBox::drop-down:hover {
+                background-color: #14242F;
+            }
+            /* Combobox popup list view: ensure black background and visible items */
+            QComboBox QAbstractItemView {
+                background-color: #0A1118;
+                color: #EAF0F4;
+                border: 1px solid #1E3240;
+                border-radius: 6px;
+                padding: 4px;
+                selection-background-color: #173815;
+                selection-color: #A8F14B;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 28px;
+                padding: 4px 8px;
+                border-radius: 4px;
+                color: #EAF0F4;
+                background-color: transparent;
+            }
+            QComboBox QAbstractItemView::item:hover,
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #163314;
+                color: #A8F14B;
+            }
+            /* Spinbox and DateEdit buttons */
+            QDateEdit::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top left;
+                width: 28px;
+                border-left: 1px solid #1A2833;
+                background-color: #0B141B;
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button,
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                background-color: #0B141B;
+                border: 1px solid #1A2833;
+                width: 20px;
+            }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+                background-color: #14242F;
+            }
+            QCalendarWidget QWidget {
+                background-color: #0A1118;
+                color: #EAF0F4;
+            }
+            QCalendarWidget QTableView {
+                background-color: #080F15;
+                color: #EAF0F4;
+                selection-background-color: #244015;
+                selection-color: #A8F14B;
             }
             QTableWidget#darkTable {
                 background: #080F15;
@@ -11328,7 +11447,26 @@ class MainWindow(QMainWindow):
                 background-color: #C9FF80;
             }
             """
-        )
+        app = QApplication.instance()
+        if app is not None:
+            from PySide6.QtGui import QPalette, QColor
+            dark_palette = QPalette()
+            dark_palette.setColor(QPalette.Window, QColor("#050B10"))
+            dark_palette.setColor(QPalette.WindowText, QColor("#E9EEF2"))
+            dark_palette.setColor(QPalette.Base, QColor("#080F15"))
+            dark_palette.setColor(QPalette.AlternateBase, QColor("#0B141B"))
+            dark_palette.setColor(QPalette.ToolTipBase, QColor("#0B141B"))
+            dark_palette.setColor(QPalette.ToolTipText, QColor("#E9EEF2"))
+            dark_palette.setColor(QPalette.Text, QColor("#EAF0F4"))
+            dark_palette.setColor(QPalette.Button, QColor("#0B141B"))
+            dark_palette.setColor(QPalette.ButtonText, QColor("#EAF0F4"))
+            dark_palette.setColor(QPalette.BrightText, QColor("#7ED321"))
+            dark_palette.setColor(QPalette.Link, QColor("#7ED321"))
+            dark_palette.setColor(QPalette.Highlight, QColor("#244015"))
+            dark_palette.setColor(QPalette.HighlightedText, QColor("#A8F14B"))
+            app.setPalette(dark_palette)
+            app.setStyleSheet(style_text)
+        self.setStyleSheet(style_text)
 
 
 def main() -> None:
@@ -11371,6 +11509,7 @@ def main() -> None:
         debug_log(f"qt_message_handler: install-failed {exc}")
 
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     app.setApplicationName(APP_NAME)
     app.setLayoutDirection(Qt.RightToLeft)
     app.setFont(QFont("Segoe UI", 11))
