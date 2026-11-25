@@ -18,11 +18,15 @@ unsent = []
 
 MESSAGE_SEND_MODE = "typing"
 MESSAGE_CHAR_DELAY = 0.02
+SEARCH_BAR_X = 300
+SEARCH_BAR_Y = 198
+CHAT_INPUT_X = 750
+CHAT_INPUT_Y = 980
 
 
 def apply_send_settings(settings=None):
-    """Apply the configured WhatsApp sending mode and per-character delay."""
-    global MESSAGE_SEND_MODE, MESSAGE_CHAR_DELAY
+    """Apply the configured WhatsApp sending mode, per-character delay, and coordinates."""
+    global MESSAGE_SEND_MODE, MESSAGE_CHAR_DELAY, SEARCH_BAR_X, SEARCH_BAR_Y, CHAT_INPUT_X, CHAT_INPUT_Y
     if settings is None:
         return
     mode = str(settings.get("whatsapp_send_mode", "typing") or "typing").strip().lower()
@@ -34,7 +38,43 @@ def apply_send_settings(settings=None):
         delay = MESSAGE_CHAR_DELAY
     MESSAGE_SEND_MODE = mode
     MESSAGE_CHAR_DELAY = max(0.0, min(delay, 0.5))
-    return {"mode": MESSAGE_SEND_MODE, "char_delay": MESSAGE_CHAR_DELAY}
+
+    try:
+        val_x = int(settings.get("search_bar_x", SEARCH_BAR_X) or SEARCH_BAR_X)
+        if val_x > 0:
+            SEARCH_BAR_X = val_x
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        val_y = int(settings.get("search_bar_y", SEARCH_BAR_Y) or SEARCH_BAR_Y)
+        if val_y > 0:
+            SEARCH_BAR_Y = val_y
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        val_cx = int(settings.get("chat_input_x", CHAT_INPUT_X) or CHAT_INPUT_X)
+        if val_cx > 0:
+            CHAT_INPUT_X = val_cx
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        val_cy = int(settings.get("chat_input_y", CHAT_INPUT_Y) or CHAT_INPUT_Y)
+        if val_cy > 0:
+            CHAT_INPUT_Y = val_cy
+    except (TypeError, ValueError):
+        pass
+
+    return {
+        "mode": MESSAGE_SEND_MODE,
+        "char_delay": MESSAGE_CHAR_DELAY,
+        "search_bar_x": SEARCH_BAR_X,
+        "search_bar_y": SEARCH_BAR_Y,
+        "chat_input_x": CHAT_INPUT_X,
+        "chat_input_y": CHAT_INPUT_Y,
+    }
 
 
 def write_message(message: str, char_delay: float = None, use_paste_mode: bool = False):
@@ -483,6 +523,31 @@ def whatsupp_ready():
         #hotkey("ctrl", "a")
         #press("delete")
 
+def verify_message_in_input(expected_message: str) -> bool:
+    """Check if expected_message is present in the focused WhatsApp typing input."""
+    if not expected_message or not expected_message.strip():
+        return True
+    try:
+        sentinel = "___CHECK_PASTE_SENTINEL___"
+        copy(sentinel)
+        sleep(0.15)
+        hotkey("ctrl", "a")
+        sleep(0.2)
+        hotkey("ctrl", "c")
+        sleep(0.2)
+        current_clip = paste()
+        if current_clip != sentinel and current_clip.strip():
+            exp = expected_message.strip()
+            cur = current_clip.strip()
+            if exp == cur or exp in cur or cur in exp:
+                return True
+            if len(exp) > 15 and (exp[:15] in cur or exp[-15:] in cur):
+                return True
+    except Exception as exc:
+        print(f"[verify_message_in_input] Verification error: {exc}")
+    return False
+
+
 def send_message(phone: str, message: str = "", image: str = None, topic: str = None, message_bank: dict = None, context: dict = None):
     if isinstance(message, dict):
         message_bank = message
@@ -501,38 +566,110 @@ def send_message(phone: str, message: str = "", image: str = None, topic: str = 
         except Exception as exc:
             print(f"[send_message] Error formatting message: {exc}")
 
-
-
-    print("is it english?")
     global unsent
     print("in sending")
     print(phone, message)
-    press("esc")
-    random_delay(0.35, 0.8)
-    human_move_to(300, 198, duration_range=(0.45, 1.25), jitter=24)
-    pyautogui.doubleClick(300, 198)
-    random_delay(0.4, 0.9)
-    hotkey("ctrl", "a")
-    random_delay(1.02, 2.12)
-    press(" ")
-    random_delay(0.72, 1.22)
-    write(phone)
-    random_delay(3.1, 5.4)
 
-    press("enter")
-    random_delay(2.3, 3.5)
-    
-    copy(message)
-    random_delay(3, 5)
-    pyautogui.keyDown('ctrl')
-    random_delay()
-    pyautogui.press('v')
-    random_delay()
-    pyautogui.keyUp('ctrl')
-    random_delay(2,3)
+    message_sent = False
+    max_chat_retries = 3
 
-    press("enter")
-    random_delay(1.35, 2.75)
+    for chat_attempt in range(max_chat_retries):
+        print(f"[send_message] Searching contact {phone} (attempt {chat_attempt + 1}/{max_chat_retries})...")
+        press("esc")
+        random_delay(0.35, 0.7)
+        human_move_to(SEARCH_BAR_X, SEARCH_BAR_Y, duration_range=(0.4, 0.8), jitter=15)
+        pyautogui.doubleClick(SEARCH_BAR_X, SEARCH_BAR_Y)
+        random_delay(0.4, 0.8)
+        hotkey("ctrl", "a")
+        random_delay(0.3, 0.6)
+        press("backspace")
+        random_delay(0.3, 0.5)
+        write(phone)
+        random_delay(2.5, 4.0)
+
+        press("enter")
+        random_delay(2.5, 4.0)
+
+        # Move to chat typing area and click
+        print(f"[send_message] Clicking chat typing area at ({CHAT_INPUT_X}, {CHAT_INPUT_Y})...")
+        human_move_to(CHAT_INPUT_X, CHAT_INPUT_Y, duration_range=(0.4, 0.8), jitter=15)
+        pyautogui.click(CHAT_INPUT_X, CHAT_INPUT_Y)
+        random_delay(0.6, 1.2)
+
+        # Strategy 1: Press Ctrl+V directly and check
+        print("[send_message] Strategy 1: copy message and press ctrl+v...")
+        copy(message)
+        random_delay(0.4, 0.8)
+        pyautogui.click(CHAT_INPUT_X, CHAT_INPUT_Y)
+        random_delay(0.3, 0.5)
+        pyautogui.hotkey('ctrl', 'v')
+        random_delay(0.6, 1.0)
+        pasted = verify_message_in_input(message)
+
+        # Strategy 2: If not, try hotkey ctrl+v and check
+        if not pasted:
+            print("[send_message] Strategy 1 failed! Strategy 2: re-copy, re-click, hotkey ctrl+v...")
+            hotkey("ctrl", "a")
+            random_delay(0.2, 0.4)
+            press("backspace")
+            random_delay(0.3, 0.5)
+            copy(message)
+            random_delay(0.5, 1.0)
+            pyautogui.click(CHAT_INPUT_X, CHAT_INPUT_Y)
+            random_delay(0.4, 0.8)
+            hotkey('ctrl', 'v')
+            random_delay(0.7, 1.2)
+            pasted = verify_message_in_input(message)
+
+        # Strategy 3: If not, try keydown ctrl, press v with interval, keyup ctrl
+        if not pasted:
+            print("[send_message] Strategy 2 failed! Strategy 3: keyDown ctrl, press v with interval, keyUp ctrl...")
+            hotkey("ctrl", "a")
+            random_delay(0.2, 0.4)
+            press("backspace")
+            random_delay(0.3, 0.5)
+            copy(message)
+            random_delay(0.5, 1.0)
+            pyautogui.click(CHAT_INPUT_X, CHAT_INPUT_Y)
+            random_delay(0.4, 0.8)
+            pyautogui.keyDown('ctrl')
+            sleep(0.3)
+            pyautogui.press('v')
+            sleep(0.3)
+            pyautogui.keyUp('ctrl')
+            random_delay(0.7, 1.2)
+            pasted = verify_message_in_input(message)
+
+        if pasted:
+            print("[send_message] SUCCESS: Message verified in WhatsApp typing area! Sending...")
+            press('end')
+            random_delay(0.3, 0.6)
+            press("enter")
+            random_delay(1.5, 2.5)
+            message_sent = True
+            break
+        else:
+            print(f"[send_message] WARNING: All 3 paste strategies failed on attempt {chat_attempt + 1}. Retrying all over again...")
+            press("esc")
+            random_delay(1.0, 2.0)
+
+    if not message_sent:
+        print(f"[send_message] ERROR: Failed to paste and send message to {phone} after {max_chat_retries} attempts.")
+        raise RuntimeError(f"Failed to paste and send message to {phone} after {max_chat_retries} attempts")
+
+    if image:
+        try:
+            copy_image_to_clipboard(image)
+            random_delay(1.0, 2.0)
+            pyautogui.click(CHAT_INPUT_X, CHAT_INPUT_Y)
+            random_delay(0.5, 1.0)
+            pyautogui.hotkey('ctrl', 'v')
+            random_delay(2.0, 3.5)
+            press("enter")
+            random_delay(1.5, 2.5)
+        except Exception as exc:
+            print(f"[send_message] Error pasting image: {exc}")
+
     print("Finished sending")
 
 

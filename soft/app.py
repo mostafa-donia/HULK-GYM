@@ -5979,7 +5979,7 @@ class SettingsPage(BasePage):
         whatsapp_layout.addWidget(make_label("التقرير اليومي يتجهز تلقائيًا في الوقت المحدد ويروح لرقم المدير.", "smallMuted"), 7, 0, 1, 2)
         self.scroll_layout.addWidget(whatsapp_box)
 
-        self.scroll_layout.addWidget(make_label("معايرة شريط البحث في واتساب", "sectionTitle"))
+        self.scroll_layout.addWidget(make_label("معايرة شريط البحث ومنطقة كتابة الرسائل في واتساب", "sectionTitle"))
         calibration_box = QFrame()
         calibration_box.setObjectName("settingsBox")
         calibration_layout = QGridLayout(calibration_box)
@@ -6001,13 +6001,32 @@ class SettingsPage(BasePage):
         calibration_layout.addWidget(make_label("إحداثي Y لشريط البحث", "fieldLabel"), 1, 1)
         calibration_layout.addWidget(self.search_bar_y, 1, 0)
 
-        self.test_calibration_btn = QPushButton("اختبر المعايرة (انقر على شريط البحث خلال 3 ثواني)")
+        self.test_calibration_btn = QPushButton("اختبر معايرة شريط البحث (ضع الماوس على شريط البحث خلال 3 ثوانٍ)")
         self.test_calibration_btn.setObjectName("secondaryButton")
         self.test_calibration_btn.clicked.connect(self.test_calibration)
         calibration_layout.addWidget(self.test_calibration_btn, 2, 0, 1, 2)
 
-        self.calibration_status = make_label("اضغط الزر للبدء بالمعايرة", "smallMuted")
-        calibration_layout.addWidget(self.calibration_status, 3, 0, 1, 2)
+        self.chat_input_x = QSpinBox()
+        self.chat_input_x.setMinimum(0)
+        self.chat_input_x.setMaximum(9999)
+        self.chat_input_x.setSuffix(" px")
+        calibration_layout.addWidget(make_label("إحداثي X لمنطقة كتابة الرسالة", "fieldLabel"), 3, 1)
+        calibration_layout.addWidget(self.chat_input_x, 3, 0)
+
+        self.chat_input_y = QSpinBox()
+        self.chat_input_y.setMinimum(0)
+        self.chat_input_y.setMaximum(9999)
+        self.chat_input_y.setSuffix(" px")
+        calibration_layout.addWidget(make_label("إحداثي Y لمنطقة كتابة الرسالة", "fieldLabel"), 4, 1)
+        calibration_layout.addWidget(self.chat_input_y, 4, 0)
+
+        self.test_chat_calibration_btn = QPushButton("اختبر معايرة منطقة الكتابة (ضع الماوس على مكان كتابة الرسائل خلال 3 ثوانٍ)")
+        self.test_chat_calibration_btn.setObjectName("secondaryButton")
+        self.test_chat_calibration_btn.clicked.connect(self.test_chat_calibration)
+        calibration_layout.addWidget(self.test_chat_calibration_btn, 5, 0, 1, 2)
+
+        self.calibration_status = make_label("اضغط أحد الأزرار للبدء بالمعايرة", "smallMuted")
+        calibration_layout.addWidget(self.calibration_status, 6, 0, 1, 2)
 
         self.scroll_layout.addWidget(calibration_box)
 
@@ -6152,7 +6171,7 @@ class SettingsPage(BasePage):
             self.confirm_password.clear()
 
     def set_settings_controls_enabled(self, enabled: bool) -> None:
-        for attr in ("manager_mobile", "daily_report_time", "whatsapp_enabled_toggle", "whatsapp_send_mode", "whatsapp_letter_delay", "whatsapp_hourly_order", "message_bank_tabs", "update_message_bank_btn", "plans_table", "methods", "expense_categories", "save_settings_btn", "sync_contacts_btn", "force_sync_contacts_btn", "add_plan_btn", "delete_selected_btn", "search_bar_x", "search_bar_y", "test_calibration_btn", "esp_ip", "esp_port", "esp_enabled_toggle"):
+        for attr in ("manager_mobile", "daily_report_time", "whatsapp_enabled_toggle", "whatsapp_send_mode", "whatsapp_letter_delay", "whatsapp_hourly_order", "message_bank_tabs", "update_message_bank_btn", "plans_table", "methods", "expense_categories", "save_settings_btn", "sync_contacts_btn", "force_sync_contacts_btn", "add_plan_btn", "delete_selected_btn", "search_bar_x", "search_bar_y", "test_calibration_btn", "chat_input_x", "chat_input_y", "test_chat_calibration_btn", "esp_ip", "esp_port", "esp_enabled_toggle"):
             widget = getattr(self, attr, None)
             if widget is not None:
                 widget.setEnabled(enabled)
@@ -6342,11 +6361,17 @@ class SettingsPage(BasePage):
         self.methods.setText("، ".join(self.store.settings.get("payment_methods", [])))
         self.expense_categories.setText("، ".join(self.store.settings.get("expense_categories", [])))
         if hasattr(self, "search_bar_x"):
-            self.search_bar_x.setValue(int(self.store.settings.get("search_bar_x", 0)))
+            self.search_bar_x.setValue(int(self.store.settings.get("search_bar_x", 300) or 300))
         if hasattr(self, "search_bar_y"):
-            self.search_bar_y.setValue(int(self.store.settings.get("search_bar_y", 0)))
-        if hasattr(self, "calibration_status") and (self.search_bar_x.value() or self.search_bar_y.value()):
-            self.calibration_status.setText(f"✓ المعايرة محفوظة: X={self.search_bar_x.value()}, Y={self.search_bar_y.value()}")
+            self.search_bar_y.setValue(int(self.store.settings.get("search_bar_y", 198) or 198))
+        if hasattr(self, "chat_input_x"):
+            self.chat_input_x.setValue(int(self.store.settings.get("chat_input_x", 750) or 750))
+        if hasattr(self, "chat_input_y"):
+            self.chat_input_y.setValue(int(self.store.settings.get("chat_input_y", 980) or 980))
+        if hasattr(self, "calibration_status") and (self.search_bar_x.value() or self.chat_input_x.value()):
+            self.calibration_status.setText(
+                f"✓ البحث: X={self.search_bar_x.value()}, Y={self.search_bar_y.value()} | الكتابة: X={self.chat_input_x.value()}, Y={self.chat_input_y.value()}"
+            )
         if hasattr(self, "esp_ip"):
             self.esp_ip.setText(str(self.store.settings.get("esp_ip", "192.168.1.254")))
         if hasattr(self, "esp_port"):
@@ -6420,6 +6445,10 @@ class SettingsPage(BasePage):
             self.store.settings["search_bar_x"] = int(self.search_bar_x.value())
         if hasattr(self, "search_bar_y"):
             self.store.settings["search_bar_y"] = int(self.search_bar_y.value())
+        if hasattr(self, "chat_input_x"):
+            self.store.settings["chat_input_x"] = int(self.chat_input_x.value())
+        if hasattr(self, "chat_input_y"):
+            self.store.settings["chat_input_y"] = int(self.chat_input_y.value())
         if hasattr(self, "esp_ip"):
             esp_ip = self.esp_ip.text().strip() or "192.168.1.254"
             self.store.settings["esp_ip"] = esp_ip
@@ -6458,55 +6487,76 @@ class SettingsPage(BasePage):
             QMessageBox.critical(self, "خطأ", "حدث خطأ أثناء حفظ رسائل الواتساب. تأكد من صلاحيات الملفات.")
 
     def test_calibration(self) -> None:
-        """Test WhatsApp search bar calibration by recording mouse click position."""
+        """Test WhatsApp search bar calibration by recording mouse position."""
         if not self.password_unlocked:
             QMessageBox.warning(self, "تنبيه", "افتح الإعدادات أولًا قبل معايرة شريط البحث.")
             return
-        
-        reply = QMessageBox.information(
+
+        QMessageBox.information(
             self,
             "معايرة شريط البحث",
-            "سيتم تسجيل موقع الماوس عند النقر عليه.\n\nانقر على شريط البحث في واتساب خلال 3 ثوانٍ...",
+            "سيتم تسجيل موقع الماوس بعد 3 ثوانٍ.\n\nضع مؤشر الماوس على شريط البحث في واتساب ويب وانتظر...",
             QMessageBox.Ok,
-            QMessageBox.Ok
+            QMessageBox.Ok,
         )
-        
-        # Disable the button during calibration
+
         self.test_calibration_btn.setEnabled(False)
-        self.calibration_status.setText("⏱ جاري انتظار النقرة... (3 ثواني)")
-        
-        # Import mouse position tracking
-        try:
-            import pyautogui
-            import time
-            
-            # Set a timeout for waiting
-            start_time = time.time()
-            timeout = 3
-            last_pos = pyautogui.position()
-            
-            while time.time() - start_time < timeout:
+        self.calibration_status.setText("⏱ جاري انتظار التقاط موقع شريط البحث... (3 ثواني)")
+
+        def capture():
+            try:
+                import pyautogui
                 current_pos = pyautogui.position()
-                # Check if mouse moved significantly (click detected by position change or listener)
-                time.sleep(0.1)
-            
-            # For simplicity, just prompt user to enter coordinates manually or use current mouse position
-            current_pos = pyautogui.position()
-            self.search_bar_x.setValue(current_pos[0])
-            self.search_bar_y.setValue(current_pos[1])
-            self.calibration_status.setText(f"✓ تم التقاط: X={current_pos[0]}, Y={current_pos[1]}")
-            
-            QMessageBox.information(
-                self,
-                "تم",
-                f"تم تسجيل إحداثيات شريط البحث:\nX: {current_pos[0]}\nY: {current_pos[1]}\n\nأنقر حفظ الإعدادات لحفظ هذه المعايرة."
-            )
-        except ImportError:
-            QMessageBox.critical(self, "خطأ", "لم يتم العثور على مكتبة pyautogui. تأكد من تثبيتها.")
-        except Exception as e:
-            QMessageBox.critical(self, "خطأ", f"حدث خطأ أثناء المعايرة: {str(e)}")
-        finally:
-            self.test_calibration_btn.setEnabled(True)
+                self.search_bar_x.setValue(current_pos[0])
+                self.search_bar_y.setValue(current_pos[1])
+                self.calibration_status.setText(f"✓ تم التقاط شريط البحث: X={current_pos[0]}, Y={current_pos[1]}")
+                QMessageBox.information(
+                    self,
+                    "تم",
+                    f"تم تسجيل إحداثيات شريط البحث:\nX: {current_pos[0]}\nY: {current_pos[1]}\n\nاضغط على 'حفظ الإعدادات' لحفظ التعديلات.",
+                )
+            except Exception as exc:
+                self.calibration_status.setText(f"خطأ في المعايرة: {exc}")
+            finally:
+                self.test_calibration_btn.setEnabled(True)
+
+        QTimer.singleShot(3000, capture)
+
+    def test_chat_calibration(self) -> None:
+        """Test WhatsApp chat typing area calibration by recording mouse position."""
+        if not self.password_unlocked:
+            QMessageBox.warning(self, "تنبيه", "افتح الإعدادات أولًا قبل معايرة منطقة الكتابة.")
+            return
+
+        QMessageBox.information(
+            self,
+            "معايرة منطقة كتابة الرسالة",
+            "سيتم تسجيل موقع الماوس بعد 3 ثوانٍ.\n\nضع مؤشر الماوس على مكان كتابة الرسائل (أسفل المحادثة) في واتساب ويب وانتظر...",
+            QMessageBox.Ok,
+            QMessageBox.Ok,
+        )
+
+        self.test_chat_calibration_btn.setEnabled(False)
+        self.calibration_status.setText("⏱ جاري انتظار التقاط موقع منطقة الكتابة... (3 ثواني)")
+
+        def capture():
+            try:
+                import pyautogui
+                current_pos = pyautogui.position()
+                self.chat_input_x.setValue(current_pos[0])
+                self.chat_input_y.setValue(current_pos[1])
+                self.calibration_status.setText(f"✓ تم التقاط منطقة الكتابة: X={current_pos[0]}, Y={current_pos[1]}")
+                QMessageBox.information(
+                    self,
+                    "تم",
+                    f"تم تسجيل إحداثيات منطقة كتابة الرسائل:\nX: {current_pos[0]}\nY: {current_pos[1]}\n\nاضغط على 'حفظ الإعدادات' لحفظ التعديلات.",
+                )
+            except Exception as exc:
+                self.calibration_status.setText(f"خطأ في المعايرة: {exc}")
+            finally:
+                self.test_chat_calibration_btn.setEnabled(True)
+
+        QTimer.singleShot(3000, capture)
 
 
 
