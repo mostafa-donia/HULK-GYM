@@ -590,17 +590,17 @@ def send_message(phone: str, message: str = "", image: str = None, topic: str = 
         press("enter")
         random_delay(2.5, 4.0)
 
-        # Move to chat typing area and click
-        print(f"[send_message] Clicking chat typing area at ({CHAT_INPUT_X}, {CHAT_INPUT_Y})...")
+        # Move to chat typing area and double click
+        print(f"[send_message] Double clicking chat typing area at ({CHAT_INPUT_X}, {CHAT_INPUT_Y})...")
         human_move_to(CHAT_INPUT_X, CHAT_INPUT_Y, duration_range=(0.4, 0.8), jitter=15)
-        pyautogui.click(CHAT_INPUT_X, CHAT_INPUT_Y)
+        pyautogui.doubleClick(CHAT_INPUT_X, CHAT_INPUT_Y)
         random_delay(0.6, 1.2)
 
         # Strategy 1: Press Ctrl+V directly and check
         print("[send_message] Strategy 1: copy message and press ctrl+v...")
         copy(message)
         random_delay(0.4, 0.8)
-        pyautogui.click(CHAT_INPUT_X, CHAT_INPUT_Y)
+        pyautogui.doubleClick(CHAT_INPUT_X, CHAT_INPUT_Y)
         random_delay(0.3, 0.5)
         pyautogui.hotkey('ctrl', 'v')
         random_delay(0.6, 1.0)
@@ -615,7 +615,7 @@ def send_message(phone: str, message: str = "", image: str = None, topic: str = 
             random_delay(0.3, 0.5)
             copy(message)
             random_delay(0.5, 1.0)
-            pyautogui.click(CHAT_INPUT_X, CHAT_INPUT_Y)
+            pyautogui.doubleClick(CHAT_INPUT_X, CHAT_INPUT_Y)
             random_delay(0.4, 0.8)
             hotkey('ctrl', 'v')
             random_delay(0.7, 1.2)
@@ -630,7 +630,7 @@ def send_message(phone: str, message: str = "", image: str = None, topic: str = 
             random_delay(0.3, 0.5)
             copy(message)
             random_delay(0.5, 1.0)
-            pyautogui.click(CHAT_INPUT_X, CHAT_INPUT_Y)
+            pyautogui.doubleClick(CHAT_INPUT_X, CHAT_INPUT_Y)
             random_delay(0.4, 0.8)
             pyautogui.keyDown('ctrl')
             sleep(0.3)
@@ -661,7 +661,7 @@ def send_message(phone: str, message: str = "", image: str = None, topic: str = 
         try:
             copy_image_to_clipboard(image)
             random_delay(1.0, 2.0)
-            pyautogui.click(CHAT_INPUT_X, CHAT_INPUT_Y)
+            pyautogui.doubleClick(CHAT_INPUT_X, CHAT_INPUT_Y)
             random_delay(0.5, 1.0)
             pyautogui.hotkey('ctrl', 'v')
             random_delay(2.0, 3.5)

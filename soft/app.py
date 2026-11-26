@@ -5847,7 +5847,7 @@ class SettingsPage(BasePage):
     def __init__(self, store: Store) -> None:
         super().__init__(store, "الإعدادات", "كل تعديل في الإعدادات يحتاج إدخال كلمة السر الحالية أولًا")
 
-        self.unlock_duration_seconds = 60
+        self.unlock_duration_seconds = 120
         self.unlock_warning_seconds = 10
         self.unlock_session_id = 0
         self.unlock_expires_at: Optional[datetime] = None
@@ -6001,7 +6001,7 @@ class SettingsPage(BasePage):
         calibration_layout.addWidget(make_label("إحداثي Y لشريط البحث", "fieldLabel"), 1, 1)
         calibration_layout.addWidget(self.search_bar_y, 1, 0)
 
-        self.test_calibration_btn = QPushButton("اختبر معايرة شريط البحث (ضع الماوس على شريط البحث خلال 3 ثوانٍ)")
+        self.test_calibration_btn = QPushButton("اختبر معايرة شريط البحث (ضع الماوس على شريط البحث خلال 10 ثوانٍ)")
         self.test_calibration_btn.setObjectName("secondaryButton")
         self.test_calibration_btn.clicked.connect(self.test_calibration)
         calibration_layout.addWidget(self.test_calibration_btn, 2, 0, 1, 2)
@@ -6020,7 +6020,7 @@ class SettingsPage(BasePage):
         calibration_layout.addWidget(make_label("إحداثي Y لمنطقة كتابة الرسالة", "fieldLabel"), 4, 1)
         calibration_layout.addWidget(self.chat_input_y, 4, 0)
 
-        self.test_chat_calibration_btn = QPushButton("اختبر معايرة منطقة الكتابة (ضع الماوس على مكان كتابة الرسائل خلال 3 ثوانٍ)")
+        self.test_chat_calibration_btn = QPushButton("اختبر معايرة منطقة الكتابة (ضع الماوس على مكان كتابة الرسائل خلال 10 ثوانٍ)")
         self.test_chat_calibration_btn.setObjectName("secondaryButton")
         self.test_chat_calibration_btn.clicked.connect(self.test_chat_calibration)
         calibration_layout.addWidget(self.test_chat_calibration_btn, 5, 0, 1, 2)
@@ -6495,13 +6495,13 @@ class SettingsPage(BasePage):
         QMessageBox.information(
             self,
             "معايرة شريط البحث",
-            "سيتم تسجيل موقع الماوس بعد 3 ثوانٍ.\n\nضع مؤشر الماوس على شريط البحث في واتساب ويب وانتظر...",
+            "سيتم تسجيل موقع الماوس بعد 10 ثوانٍ.\n\nضع مؤشر الماوس على شريط البحث في واتساب ويب وانتظر...",
             QMessageBox.Ok,
             QMessageBox.Ok,
         )
 
         self.test_calibration_btn.setEnabled(False)
-        self.calibration_status.setText("⏱ جاري انتظار التقاط موقع شريط البحث... (3 ثواني)")
+        self.calibration_status.setText("⏱ جاري انتظار التقاط موقع شريط البحث... (10 ثواني)")
 
         def capture():
             try:
@@ -6520,7 +6520,7 @@ class SettingsPage(BasePage):
             finally:
                 self.test_calibration_btn.setEnabled(True)
 
-        QTimer.singleShot(3000, capture)
+        QTimer.singleShot(10000, capture)
 
     def test_chat_calibration(self) -> None:
         """Test WhatsApp chat typing area calibration by recording mouse position."""
@@ -6531,13 +6531,13 @@ class SettingsPage(BasePage):
         QMessageBox.information(
             self,
             "معايرة منطقة كتابة الرسالة",
-            "سيتم تسجيل موقع الماوس بعد 3 ثوانٍ.\n\nضع مؤشر الماوس على مكان كتابة الرسائل (أسفل المحادثة) في واتساب ويب وانتظر...",
+            "سيتم تسجيل موقع الماوس بعد 10 ثوانٍ.\n\nضع مؤشر الماوس على مكان كتابة الرسائل (أسفل المحادثة) في واتساب ويب وانتظر...",
             QMessageBox.Ok,
             QMessageBox.Ok,
         )
 
         self.test_chat_calibration_btn.setEnabled(False)
-        self.calibration_status.setText("⏱ جاري انتظار التقاط موقع منطقة الكتابة... (3 ثواني)")
+        self.calibration_status.setText("⏱ جاري انتظار التقاط موقع منطقة الكتابة... (10 ثواني)")
 
         def capture():
             try:
@@ -6556,7 +6556,7 @@ class SettingsPage(BasePage):
             finally:
                 self.test_chat_calibration_btn.setEnabled(True)
 
-        QTimer.singleShot(3000, capture)
+        QTimer.singleShot(10000, capture)
 
 
 
