@@ -787,6 +787,10 @@ def default_settings() -> Dict[str, Any]:
         "whatsapp_send_mode": "typing",
         "whatsapp_letter_delay": 0.02,
         "whatsapp_hourly_order": "newest",
+        "search_bar_x": 240,
+        "search_bar_y": 206,
+        "chat_input_x": 812,
+        "chat_input_y": 682,
     }
 
 
@@ -1306,6 +1310,17 @@ class Store:
         except Exception:
             self.settings["whatsapp_letter_delay"] = defaults["whatsapp_letter_delay"]
             changed = True
+
+        for coord_key, default_val in (("search_bar_x", 240), ("search_bar_y", 206), ("chat_input_x", 812), ("chat_input_y", 682)):
+            try:
+                cval = int(self.settings.get(coord_key, default_val) or default_val)
+                if cval <= 0:
+                    cval = default_val
+            except Exception:
+                cval = default_val
+            if self.settings.get(coord_key) != cval:
+                self.settings[coord_key] = cval
+                changed = True
 
         plans = self.settings.get("plans")
         requested_names = {p["name"] for p in defaults["plans"]}
@@ -6361,13 +6376,13 @@ class SettingsPage(BasePage):
         self.methods.setText("، ".join(self.store.settings.get("payment_methods", [])))
         self.expense_categories.setText("، ".join(self.store.settings.get("expense_categories", [])))
         if hasattr(self, "search_bar_x"):
-            self.search_bar_x.setValue(int(self.store.settings.get("search_bar_x", 300) or 300))
+            self.search_bar_x.setValue(int(self.store.settings.get("search_bar_x", 240) or 240))
         if hasattr(self, "search_bar_y"):
-            self.search_bar_y.setValue(int(self.store.settings.get("search_bar_y", 198) or 198))
+            self.search_bar_y.setValue(int(self.store.settings.get("search_bar_y", 206) or 206))
         if hasattr(self, "chat_input_x"):
-            self.chat_input_x.setValue(int(self.store.settings.get("chat_input_x", 750) or 750))
+            self.chat_input_x.setValue(int(self.store.settings.get("chat_input_x", 812) or 812))
         if hasattr(self, "chat_input_y"):
-            self.chat_input_y.setValue(int(self.store.settings.get("chat_input_y", 980) or 980))
+            self.chat_input_y.setValue(int(self.store.settings.get("chat_input_y", 682) or 682))
         if hasattr(self, "calibration_status") and (self.search_bar_x.value() or self.chat_input_x.value()):
             self.calibration_status.setText(
                 f"✓ البحث: X={self.search_bar_x.value()}, Y={self.search_bar_y.value()} | الكتابة: X={self.chat_input_x.value()}, Y={self.chat_input_y.value()}"
